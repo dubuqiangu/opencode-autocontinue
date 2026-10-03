@@ -28,7 +28,8 @@ export function sessionIDFromMessageInfo(info: Record<string, unknown> | undefin
   return typeof sessionID === "string" && sessionID ? sessionID : undefined
 }
 
-/** Normalize an error-like value into a matchable string "Name: message". */
+/** Normalize an error-like value into a matchable string "Name: message (status: N)".
+ *  status 存在时拼入，让纯 5xx 裸状态（无 message）也能被 pattern 匹配。 */
 export function errorToMatchString(error: unknown): string {
   if (!error || typeof error !== "object") return String(error ?? "")
   const err = error as Record<string, unknown>
@@ -38,10 +39,14 @@ export function errorToMatchString(error: unknown): string {
     (typeof dataMessage === "string" ? dataMessage : null) ??
     (typeof err.message === "string" ? err.message : "") ??
     ""
-  return `${name}: ${message}`
+  const base = `${name}: ${message}`.trimEnd()
+  const status = err.status
+  if (status !== undefined && status !== null) {
+    return `${base} (status: ${status})`
+  }
+  return base
 }
 
-/** Check whether an error matches a retryable pattern (and no exclude pattern). */
 export function isRetryableError(
   error: unknown,
   errorPatterns: string[],
@@ -66,8 +71,10 @@ export function messageText(parts: unknown): string {
     .join("\n")
 }
 
-/** Whether the last assistant message contains a completion marker. */
-export function hasCompletionMarker(text: string, matcher: RegExp): boolean {
+/** Whether the last assistant message contains a completion marker.
+ *  matcher 为 null（未配置任何完成标记）时一律返回 false，视为没有完成标记。 */
+export function hasCompletionMarker(text: string, matcher: RegExp | null): boolean {
+  if (!matcher) return false
   return matcher.test(text)
 }
 

@@ -51,10 +51,15 @@ export default Plugin.define({
     // cache the last-seen sessionID here and have the command prefer it.
     let lastSlotSessionID: string | undefined
 
+    // Reuse a single RPC subclient for the plugin lifetime (avoid leaking a
+    // subclient per call).
+    let cachedRpcClient: RpcClient | undefined
     function rpcClient(): RpcClient | undefined {
+      if (cachedRpcClient !== undefined) return cachedRpcClient
       try {
         // client.rpc(contract) creates a subclient for the named RPC.
-        return (context.client as any)?.rpc?.({ id: RPC_ID, methods: {} }) ?? undefined
+        cachedRpcClient = (context.client as any)?.rpc?.({ id: RPC_ID, methods: {} }) ?? undefined
+        return cachedRpcClient
       } catch {
         return undefined
       }
@@ -87,10 +92,11 @@ export default Plugin.define({
     }
 
     function currentSessionIDFrom(slotProps?: any): string | undefined {
+      const routerSessionID = (context.ui as any)?.router?.current?.()?.params?.sessionID
       return (
         slotProps?.sessionID ??
+        (typeof routerSessionID === "string" && routerSessionID ? routerSessionID : undefined) ??
         lastSlotSessionID ??
-        (context.ui as any)?.router?.current?.()?.params?.sessionID ??
         undefined
       )
     }
@@ -110,6 +116,10 @@ export default Plugin.define({
       if (sessionID) lastSlotSessionID = sessionID
       if (!sessionID) return null
       const status = watchStatus()
+      // The global watch signal may describe a different session (another
+      // session's events/refresh landed first). Only render the indicator
+      // when the status belongs to the session this footer is rendering for.
+      if (status !== undefined && status.sessionID !== sessionID) return null
       if (!watched() && status === undefined) return null
       const label =
         status === undefined
@@ -318,7 +328,15 @@ export default Plugin.define({
           const sessionID = event?.data?.sessionID ?? event?.properties?.sessionID ?? event?.sessionID
           const state = event?.data?.state ?? event?.properties?.state
           const consecutive = event?.data?.consecutive ?? event?.properties?.consecutive ?? 0
-          if (typeof sessionID === "string") {
+          if (typeof sessionID !== "string") return
+          const current = currentSessionIDFrom()
+          if (state === "stopped") {
+            // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
+            // 用 RPC status 复查区分：unwatch 后 status.watched=false → 清空本地信号。
+            void refreshStatus(sessionID)
+          } else {
+            // watching / done：只更新信号；非当前焦点会话的事件不写全局信号。
+            if (sessionID !== current) return
             setWatched(true)
             setWatchStatus({ sessionID, state, consecutive })
           }
@@ -342,16 +360,12 @@ export default Plugin.define({
       // Fall through.
     }
 
-    onCleanup(() => {
-      stopEvents?.()
-      stopSlot?.()
-      stopSidebarSlot?.()
-      stopAppSlot?.()
-      layerDispose?.()
-      stopFocusRefresh?.()
-    })
-
-    return () => {
+    // Dispose every registered resource exactly once, whether the host calls
+    // the setup() return value or Solid's onCleanup runs first.
+    let disposed = false
+    function disposeAll(): void {
+      if (disposed) return
+      disposed = true
       stopEvents?.()
       stopSlot?.()
       stopSidebarSlot?.()
@@ -359,5 +373,9 @@ export default Plugin.define({
       layerDispose?.()
       stopFocusRefresh?.()
     }
+
+    onCleanup(disposeAll)
+
+    return disposeAll
   },
 })

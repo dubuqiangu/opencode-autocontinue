@@ -63,7 +63,8 @@ export const DEFAULT_CONFIG: PluginConfig = {
   userGraceMs: 300_000,
 }
 
-/** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse. */
+/** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
+ *  Single-quoted strings are normalized to double-quoted so JSON.parse accepts them. */
 export function parseJsonc(text: string): unknown {
   // Tolerate a UTF-8 BOM written by some editors / PowerShell.
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
@@ -75,19 +76,37 @@ export function parseJsonc(text: string): unknown {
     const char = text[index]
     if (inString) {
       if (char === "\\" && index + 1 < text.length) {
-        result += char + text[index + 1]
+        const next = text[index + 1]
+        // JSON 不接受 \' 转义：单引号串转成双引号串后要还原成裸单引号。
+        if (quoteChar === "'" && next === "'") {
+          result += "'"
+        } else {
+          result += char + next
+        }
         index += 2
         continue
       }
-      if (char === quoteChar) inString = false
-      result += char
+      if (char === quoteChar) {
+        inString = false
+        // 闭合统一写双引号，兼容 JSON.parse。
+        result += '"'
+        index++
+        continue
+      }
+      // 单引号串内的裸双引号是普通字符，转成双引号串后必须转义，避免提前断串。
+      if (quoteChar === "'" && char === '"') {
+        result += '\\"'
+      } else {
+        result += char
+      }
       index++
       continue
     }
     if (char === '"' || char === "'") {
       inString = true
       quoteChar = char
-      result += char
+      // 开头统一写双引号，兼容 JSON.parse。
+      result += '"'
       index++
     } else if (char === "/" && text[index + 1] === "/") {
       while (index < text.length && text[index] !== "\n") index++
@@ -163,8 +182,11 @@ export function loadConfig(projectDirectory?: string): PluginConfig {
   return merged
 }
 
-/** Build the completion matcher from markerRegex or completionMarkers. */
-export function buildCompletionMatcher(config: PluginConfig): RegExp {
+/** Build the completion matcher from markerRegex or completionMarkers.
+ *  Returns null when no markers are configured (empty completionMarkers and no
+ *  valid markerRegex), so callers treat the session as "no completion marker"
+ *  and keep auto-continuing instead of instantly marking the session done. */
+export function buildCompletionMatcher(config: PluginConfig): RegExp | null {
   if (config.markerRegex) {
     try {
       return new RegExp(config.markerRegex, "i")
@@ -173,5 +195,6 @@ export function buildCompletionMatcher(config: PluginConfig): RegExp {
     }
   }
   const escaped = config.completionMarkers.map((marker) => marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  if (escaped.length === 0) return null
   return new RegExp(escaped.join("|"), "i")
 }

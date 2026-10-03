@@ -157,8 +157,8 @@ async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
 }
 
 test("computeEndAt returns today's timestamp and 0 for empty", () => {
-  assert.equal(computeEndAt(""), 0)
-  const today = computeEndAt("23:59")
+  assert.equal(computeEndAt("", ""), 0)
+  const today = computeEndAt("23:59", "")
   const expected = new Date()
   expected.setHours(23, 59, 0, 0)
   assert.equal(today, expected.getTime())
@@ -167,7 +167,7 @@ test("computeEndAt returns today's timestamp and 0 for empty", () => {
   const pastTime = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`
   const pastExpected = new Date()
   pastExpected.setHours(past.getHours(), past.getMinutes(), 0, 0)
-  assert.equal(computeEndAt(pastTime), pastExpected.getTime())
+  assert.equal(computeEndAt(pastTime, ""), pastExpected.getTime())
 })
 
 test("startTimeNotReached", () => {
@@ -308,7 +308,7 @@ test("endTime reached marks stopped", async () => {
   const past = new Date(Date.now() - 60_000)
   const endTime = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`
   const { session, store, engine } = await makeEngine({ endTime, idleDelayMs: 5 })
-  await store.watch("ses_8", computeEndAt(endTime))
+  await store.watch("ses_8", computeEndAt(endTime, ""))
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_8" })
   await new Promise((resolve) => setTimeout(resolve, 60))
   assert.equal(session.prompts.length, 0)
@@ -325,4 +325,98 @@ test("retry hook rewrite uses retryHookHandler via engine", async () => {
   }
   await session.hooks?.[0]?.fn?.(event)
   assert.equal(event.decision.retry, true)
+})
+// --- regression tests for server fixes ---
+
+test("buildCompletionMatcher returns null when no completion markers configured", () => {
+  const matcher = buildCompletionMatcher({ ...DEFAULT_CONFIG, completionMarkers: [], markerRegex: "" })
+  assert.equal(matcher, null)
+  // null matcher 不会匹配任何完成标记。
+  assert.equal(hasCompletionMarker("任意文本 [任务完成]", null), false)
+})
+
+test("buildCompletionMatcher falls back to markers on invalid markerRegex", () => {
+  const matcher = buildCompletionMatcher({ ...DEFAULT_CONFIG, markerRegex: "(unclosed" })
+  assert.ok(matcher instanceof RegExp)
+  assert.ok(matcher.test("[任务完成] 完成"))
+})
+
+test("parseJsonc accepts single-quoted strings", () => {
+  const parsed = parseJsonc(`{ 'enabled': true, 'message': "it's fine" }`)
+  assert.equal(parsed.enabled, true)
+  assert.equal(parsed.message, "it's fine")
+})
+
+test("parseJsonc converts single-quoted strings with embedded double quotes", () => {
+  const parsed = parseJsonc(`{ 'message': '他说 "你好"' }`)
+  assert.equal(parsed.message, '他说 "你好"')
+})
+
+test("parseJsonc unescapes escaped single quotes inside single-quoted strings", () => {
+  const parsed = parseJsonc(`{ 'message': 'it\\'s ok' }`)
+  assert.equal(parsed.message, "it's ok")
+})
+
+test("computeEndAt rolls past endTime to tomorrow for cross-midnight windows", () => {
+  const now = new Date()
+  const today830 = new Date(now)
+  today830.setHours(8, 30, 0, 0)
+  const result = computeEndAt("08:30", "22:00")
+  if (now.getTime() >= today830.getTime()) {
+    const tomorrow830 = new Date(today830)
+    tomorrow830.setDate(tomorrow830.getDate() + 1)
+    assert.equal(result, tomorrow830.getTime())
+  } else {
+    // 本地时间尚未到今天的 08:30：endAt 应为今天。
+    assert.equal(result, today830.getTime())
+  }
+})
+
+test("computeEndAt keeps day-end semantics without startTime (passed end stays today)", () => {
+  const past = new Date(Date.now() - 60_000)
+  const endTime = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`
+  const expected = new Date()
+  expected.setHours(past.getHours(), past.getMinutes(), 0, 0)
+  assert.equal(computeEndAt(endTime, ""), expected.getTime())
+})
+
+test("errorToMatchString includes numeric status when present", () => {
+  assert.equal(errorToMatchString({ name: "AI_Error", status: 502 }), "AI_Error: (status: 502)")
+  assert.equal(errorToMatchString({ name: "AI_Error", message: "bad", status: 500 }), "AI_Error: bad (status: 500)")
+  assert.equal(errorToMatchString({ name: "AI_Error", status: 503 }), "AI_Error: (status: 503)")
+})
+
+test("retryHookHandler matches bare 5xx status via appended status", () => {
+  const event = {
+    error: { type: "AI_Error", status: 503 },
+    attempt: 1,
+    decision: { retry: false },
+  }
+  retryHookHandler(() => DEFAULT_CONFIG, event as any)
+  assert.equal(event.decision.retry, true)
+})
+
+test("concurrent tryInject calls only inject once (inFlight guard)", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_9")
+  // 门闩：第一次 context 调用挂起，制造两个 tryInject 交错的窗口。
+  let releaseContext: () => void = () => {}
+  let contextCallCount = 0
+  let gateFirstContext = true
+  session.context = () => {
+    if (gateFirstContext) {
+      gateFirstContext = false
+      return new Promise<readonly unknown[]>((resolve) => {
+        contextCallCount++
+        releaseContext = () => resolve([])
+      })
+    }
+    return Promise.resolve([])
+  }
+  const first = engine.tryInject("ses_9")
+  const second = engine.tryInject("ses_9")
+  assert.equal(contextCallCount, 1) // 第二个撞上 inFlight 闩锁，不会进入 context
+  releaseContext()
+  await Promise.all([first, second])
+  assert.equal(session.prompts.length, 1)
 })

@@ -80,7 +80,7 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   const rpcImplementation = {
     async set(input: { sessionID: string; enabled: boolean }) {
       if (input.enabled) {
-        await store.watch(input.sessionID, config().endTime ? computeEndAt(config().endTime) : 0)
+        await store.watch(input.sessionID, config().endTime ? computeEndAt(config().endTime, config().startTime) : 0)
       } else {
         await store.unwatch(input.sessionID)
       }

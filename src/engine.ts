@@ -29,18 +29,32 @@ export interface EventLike {
   info?: Record<string, unknown>
 }
 
-/** Convert "HH:MM" to today's epoch ms. Empty -> 0 (disabled). If the time is
- *  already past, it still returns today's timestamp so the daily cutoff is
- *  immediately closed (stop watching) rather than rolling to tomorrow. */
-export function computeEndAt(endTime: string): number {
+/** Convert "HH:MM" to today's epoch ms. Empty endTime -> 0 (disabled).
+ *  Cross-midnight windows (endTime clock earlier than startTime clock, e.g.
+ *  22:00 → 08:30) roll endAt to tomorrow once today's endTime has passed, so a
+ *  night watch started at 23:00 does not instantly stop. Non-cross-midnight
+ *  windows keep the original semantics: a passed endTime still returns today's
+ *  timestamp so the daily cutoff is immediately closed (stop watching). */
+export function computeEndAt(endTime: string, startTime: string): number {
   const match = /^(\d{1,2}):(\d{2})$/.exec(endTime.trim())
   if (!match) return 0
-  const date = new Date()
-  date.setHours(Number(match[1]), Number(match[2]), 0, 0)
-  return date.getTime()
+  const now = new Date()
+  const today = new Date(now)
+  today.setHours(Number(match[1]), Number(match[2]), 0, 0)
+  const startMatch = /^(\d{1,2}):(\d{2})$/.exec((startTime ?? "").trim())
+  let crossMidnight = false
+  if (startMatch) {
+    const startToday = new Date(now)
+    startToday.setHours(Number(startMatch[1]), Number(startMatch[2]), 0, 0)
+    // endTime 时刻早于 startTime 时刻（如 22:00 → 08:30）即跨日窗口。
+    crossMidnight = today.getTime() < startToday.getTime()
+  }
+  if (now.getTime() >= today.getTime() && crossMidnight) {
+    today.setDate(today.getDate() + 1)
+  }
+  return today.getTime()
 }
 
-/** "HH:MM" start window: before it -> not yet open. Empty -> always open. */
 export function startTimeNotReached(startTime: string): boolean {
   const match = /^(\d{1,2}):(\d{2})$/.exec(startTime.trim())
   if (!match) return false
@@ -63,7 +77,10 @@ export function retryHookHandler(
   if (!cfg.enabled) return
   const error = _event.error
   const attempt = _event.attempt ?? 1
-  const matchString = `${error?.type ?? ""}: ${error?.message ?? ""}`.toLowerCase()
+  const status = error?.status
+  const matchString = `${error?.type ?? ""}: ${error?.message ?? ""}${
+    status !== undefined && status !== null ? ` (status: ${status})` : ""
+  }`.toLowerCase()
   const excluded = cfg.excludePatterns.some((pattern) => matchString.includes(pattern.toLowerCase()))
   if (excluded) return
   const matched = cfg.errorPatterns.some((pattern) => matchString.includes(pattern.toLowerCase()))
@@ -114,63 +131,82 @@ export class AutocontinueEngine {
     this.timers.set(sessionID, timer)
   }
 
+    private clearTimer(sessionID: string): void {
+    const timer = this.timers.get(sessionID)
+    if (timer) {
+      clearTimeout(timer)
+      this.timers.delete(sessionID)
+    }
+  }
+
   /** Core injection decision. Idempotent per session (single-flight via inFlight). */
   private async tryInject(sessionID: string): Promise<void> {
     const cfg = this.config()
     const memory = this.store.getMemory(sessionID)
     if (this.disposed || !cfg.enabled) return
     if (memory.inFlight) return
-
-    const entry = this.store.getState(sessionID)
-    if (!entry || entry.state !== "watching") return
-
-    // Time window (endAt frozen at watch time).
-    if (startTimeNotReached(cfg.startTime)) return
-    if (entry.endAt && Date.now() >= entry.endAt) {
-      await this.store.markStopped(sessionID)
-      void this.emitChangedInternal(sessionID, "stopped")
-      return
-    }
-
-    // Consecutive cap.
-    if (cfg.maxConsecutive > 0 && entry.consecutive >= cfg.maxConsecutive) {
-      await this.store.markStopped(sessionID)
-      void this.emitChangedInternal(sessionID, "stopped")
-      return
-    }
-
-    // User grace: if the user just sent a real message, wait.
-    if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) {
-      this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 10_000))
-      return
-    }
-
-    // Session title exclusion.
-    const title = await this.resolveTitle(sessionID)
-    if (titleExcluded(title, cfg.excludeTitleKeywords)) {
-      await this.store.markStopped(sessionID)
-      void this.emitChangedInternal(sessionID, "stopped")
-      return
-    }
-
-    // Min interval between injections.
-    if (entry.lastInjectedAt && Date.now() - entry.lastInjectedAt < cfg.minIntervalMs) {
-      const remaining = cfg.minIntervalMs - (Date.now() - entry.lastInjectedAt)
-      this.scheduleInjection(sessionID, remaining + 100)
-      return
-    }
-
-    // Check for completion marker in the latest assistant message before injecting.
-    const latestText = await this.latestAssistantText(sessionID)
-    if (hasCompletionMarker(latestText, buildCompletionMatcher(cfg))) {
-      await this.store.markDone(sessionID)
-      void this.emitChangedInternal(sessionID, "done")
-      return
-    }
-
+    // 入口即置位：后面有多个 await（标题、最新消息），并发 tryInject 才能被拦住。
     memory.inFlight = true
     try {
-      await injectContinuation(this.session, sessionID, cfg.message, entry.endAt ?? 0)
+      const entry = this.store.getState(sessionID)
+      if (!entry || entry.state !== "watching") return
+
+      // Time window (endAt frozen at watch time).
+      if (startTimeNotReached(cfg.startTime)) return
+      if (entry.endAt && Date.now() >= entry.endAt) {
+        await this.store.markStopped(sessionID)
+        this.clearTimer(sessionID)
+        void this.emitChangedInternal(sessionID, "stopped")
+        return
+      }
+
+      // Consecutive cap.
+      if (cfg.maxConsecutive > 0 && entry.consecutive >= cfg.maxConsecutive) {
+        await this.store.markStopped(sessionID)
+        this.clearTimer(sessionID)
+        void this.emitChangedInternal(sessionID, "stopped")
+        return
+      }
+
+      // User grace: if the user just sent a real message, wait.
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) {
+        this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 10_000))
+        return
+      }
+
+      // Session title exclusion.
+      const title = await this.resolveTitle(sessionID)
+      if (titleExcluded(title, cfg.excludeTitleKeywords)) {
+        await this.store.markStopped(sessionID)
+        this.clearTimer(sessionID)
+        void this.emitChangedInternal(sessionID, "stopped")
+        return
+      }
+
+      // Min interval between injections.
+      if (entry.lastInjectedAt && Date.now() - entry.lastInjectedAt < cfg.minIntervalMs) {
+        const remaining = cfg.minIntervalMs - (Date.now() - entry.lastInjectedAt)
+        this.scheduleInjection(sessionID, remaining + 100)
+        return
+      }
+
+      // Check for completion marker in the latest assistant message before injecting.
+      const matcher = buildCompletionMatcher(cfg)
+      if (matcher) {
+        const latestText = await this.latestAssistantText(sessionID)
+        if (hasCompletionMarker(latestText, matcher)) {
+          await this.store.markDone(sessionID)
+          this.clearTimer(sessionID)
+          void this.emitChangedInternal(sessionID, "done")
+          return
+        }
+      }
+
+      // 注入前复查：上面 await 期间 session 可能已被 unwatch / markDone / markStopped。
+      const freshEntry = this.store.getState(sessionID)
+      if (!freshEntry || freshEntry.state !== "watching") return
+
+      await injectContinuation(this.session, sessionID, cfg.message, freshEntry.endAt ?? 0)
       await this.store.recordInjection(sessionID)
       void this.emitChangedInternal(sessionID, "watching")
     } catch (error) {
@@ -180,8 +216,7 @@ export class AutocontinueEngine {
     }
   }
 
-  /** Fetch the latest assistant message text via session context. */
-  private async latestAssistantText(sessionID: string): Promise<string> {
+    private async latestAssistantText(sessionID: string): Promise<string> {
     try {
       const messages = (await this.session.context({ sessionID })) as Array<{
         info?: { role?: string }
@@ -276,10 +311,14 @@ export class AutocontinueEngine {
           }
           const messageID = sessionIDFromMessageInfo(info as Record<string, unknown>)
           if (messageID) {
-            const text = await this.latestAssistantText(sessionID)
-            if (hasCompletionMarker(text, buildCompletionMatcher(cfg))) {
-              await this.store.markDone(sessionID)
-              void this.emitChangedInternal(sessionID, "done")
+            const matcher = buildCompletionMatcher(cfg)
+            if (matcher) {
+              const text = await this.latestAssistantText(sessionID)
+              if (hasCompletionMarker(text, matcher)) {
+                await this.store.markDone(sessionID)
+                this.clearTimer(sessionID)
+                void this.emitChangedInternal(sessionID, "done")
+              }
             }
           }
         }
@@ -287,11 +326,7 @@ export class AutocontinueEngine {
       }
       case "session.deleted": {
         this.store.unwatch(sessionID).catch(() => {})
-        const timer = this.timers.get(sessionID)
-        if (timer) {
-          clearTimeout(timer)
-          this.timers.delete(sessionID)
-        }
+        this.clearTimer(sessionID)
         break
       }
       default:

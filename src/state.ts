@@ -38,7 +38,7 @@ export class WatchStore {
         }
       }
     } catch {
-      // Storage unavailable �?run with empty list.
+      // Storage unavailable — run with empty list.
     }
   }
 
@@ -117,6 +117,10 @@ export class WatchStore {
     if (!entry) return
     entry.state = "watching"
     entry.consecutive = 0
+    // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
+    // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
+    const memory = this.inMemory.get(sessionID)
+    if (memory) memory.pendingContinue = false
     await this.persist()
   }
 
@@ -138,7 +142,7 @@ export class WatchStore {
         state: entry.state,
         consecutive: entry.consecutive,
         lastInjectedAt: entry.lastInjectedAt,
-        since: entry.since,
+      since: entry.since,
       },
     }
   }
