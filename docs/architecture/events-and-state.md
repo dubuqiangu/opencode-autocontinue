@@ -20,8 +20,8 @@
 ## 事件解析（src/events.ts）
 
 - `sessionIDFromEvent` 双兼容：V2 事件 `event.sessionID` 平铺 / 嵌套兼容
-- error 提取：从 `session.error` / assistant 消息错误载荷取错误文本
-- 完成标记正则：编译 `completionMarkers` 或 `markerRegex`，匹配 assistant 文本
+- error 提取：从 `session.error` / assistant 消息错误载荷取错误文本，归一为 `name: message (status: N)`（status 存在时拼入，纯 5xx 裸状态也能匹配 `errorPatterns`）
+- 完成标记正则：编译 `completionMarkers` 或 `markerRegex`，匹配 assistant 文本；**空 `completionMarkers` 返回 null matcher**（不检测完成，会话持续值守）
 
 ## 状态数据结构
 

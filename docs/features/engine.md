@@ -22,7 +22,7 @@ retry 层救不回（最终失败）才走会话级续跑兜底——两层互�
 
 收到 `session.error` / `session.idle` 后依次检查，全部通过才注入：
 
-1. 会话是否在值守名单？
+1. 会话是否在值守名单？（`inFlight` 锁在入口即置位，防并发重复注入）
 2. 是否被排除（`excludePatterns` / 标题关键词 / 用户最近消息宽限期）？
 3. 是否在值守时段窗口（`startTime` ~ `endTime`）？
 4. 是否在节流内（距上次注入 < `minIntervalMs`）？
@@ -31,13 +31,15 @@ retry 层救不回（最终失败）才走会话级续跑兜底——两层互�
 
 通过 → `session.prompt({sessionID, text})` 注入续跑消息（`resume: true`）。
 
+**并发防护**：`tryInject` 入口即置 `inFlight`，中间有多个 `await`（解析标题、取最新消息），并发事件/定时器不会再通过检查。注入前还会复查会话仍处于 `watching`——`await` 期间可能已被 unwatch / markDone / markStopped，此时放弃注入。
+
 ## 完成检测（停止条件）
 
 | 停止条件 | 说明 |
 |---|---|
 | 完成标记 | 最后一条 assistant 消息命中 `completionMarkers`（或 `markerRegex`）→ `done` |
 | 最大连续次数 | `consecutive >= maxConsecutive`（默认 20）→ 停止 |
-| 值守时段 | 到达 `endTime`（watch 时冻结 endAt，当天已过立即停止，不滚动到次日）→ 停止 |
+| 值守时段 | 到达 `endTime`（watch 时冻结 endAt；跨午夜窗口如 22:00→08:30 会自动滚动到次日，非跨日窗口当天已过立即停止）→ 停止 |
 | 用户手动 off | `/autocontinue off` → 停止 |
 | 用户主动中止 | `MessageAbortedError` / `operation was aborted` / `session.interrupt` → 停止但保留值守标记（可重新 on） |
 

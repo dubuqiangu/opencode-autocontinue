@@ -73,9 +73,9 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue   # 卸载
 
 ## 配置
 
-全局配置：`~/.config/opencode/opencode-autocontinue.jsonc`；项目 `.opencode/opencode-autocontinue.jsonc` 内覆盖（deep merge，优先级更高）。BOM 容错 JSONC 解析，坏文件回退默认值。
+全局配置：`~/.config/opencode/opencode-autocontinue.jsonc`；项目 `.opencode/opencode-autocontinue.jsonc` 内覆盖（deep merge，优先级更高）。BOM 容错 JSONC 解析（支持注释/尾逗号/单引号字符串），坏文件回退默认值。
 
-常用键：`enabled`（总开关）、`message`（续跑消息模板）、`startTime` / `endTime`（值守时段）、`maxConsecutive`（最大连续续跑）、`completionMarkers`（完成标记）、`excludeTitleKeywords`、`userGraceMs`。`OC_AUTOCONTINUE=0` 环境变量可整体禁用。
+常用键：`enabled`（总开关）、`message`（续跑消息模板）、`startTime` / `endTime`（值守时段，支持跨午夜窗口如 22:00→08:30）、`maxConsecutive`（最大连续续跑）、`completionMarkers`（完成标记，空数组=不检测）、`excludeTitleKeywords`、`userGraceMs`。`OC_AUTOCONTINUE=0` 环境变量可整体禁用。
 
 完整配置项见 [docs/features/config.md](docs/features/config.md)。
 

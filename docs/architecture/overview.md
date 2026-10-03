@@ -45,5 +45,5 @@ TUI 插件
 
 - **语法**：`node --check src/*.ts`（server 纯 TS）
 - **打包**：`npx esbuild src/index.ts` / `npx esbuild src/tui.tsx --loader:.tsx=tsx --jsx=automatic`
-- **单元测试**：`node --test test/server.test.ts`（25 用例，覆盖解析/判定矩阵/节流/时段/排除/完成标记）
+- **单元测试**：`node --test test/server.test.ts`（35 用例，覆盖解析/判定矩阵/节流/时段/排除/完成标记/并发/跨日窗口）
 - **真机**：本地 `file://` 加载，重启后验证 on/status/off、错误/空闲注入、完成标记停止
