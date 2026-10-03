@@ -220,6 +220,7 @@ export class AutocontinueEngine {
 
   /** Handle a single server event. */
   async handleEvent(event: EventLike): Promise<void> {
+    if (!event) return
     const type = event.type
     const sessionID = sessionIDFromEvent(event)
     if (!sessionID) return
