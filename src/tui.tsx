@@ -10,6 +10,7 @@
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createSignal, onCleanup } from "solid-js"
+import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
 
 const RPC_ID = "autocontinue"
 
@@ -57,8 +58,11 @@ export default Plugin.define({
     function rpcClient(): RpcClient | undefined {
       if (cachedRpcClient !== undefined) return cachedRpcClient
       try {
-        // client.rpc(contract) creates a subclient for the named RPC.
-        cachedRpcClient = (context.client as any)?.rpc?.({ id: RPC_ID, methods: {} }) ?? undefined
+        // client.rpc(contract) creates a subclient for the named RPC. The
+        // contract's `methods` keys become the callable methods — an empty
+        // methods object yields NO callable methods (rpc.set would be
+        // undefined). Always pass the full shared contract.
+        cachedRpcClient = (context.client as any)?.rpc?.(AUTOCONTINUE_RPC_CONTRACT) ?? undefined
         return cachedRpcClient
       } catch {
         return undefined

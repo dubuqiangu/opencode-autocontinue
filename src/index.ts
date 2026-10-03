@@ -5,7 +5,7 @@ import { loadConfig } from "./config.ts"
 import { WatchStore } from "./state.ts"
 import { AutocontinueEngine, computeEndAt } from "./engine.ts"
 import type { EventLike } from "./events.ts"
-import { AUTOCONTINUE_RPC_ID } from "./rpc.ts"
+import { AUTOCONTINUE_RPC_CONTRACT, AUTOCONTINUE_RPC_ID } from "./rpc.ts"
 
 // Minimal structural types matching the V2 plugin API surface we use.
 // The runtime provides these; we avoid a hard import to keep installs light.
@@ -45,37 +45,7 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
 
   // RPC events let the TUI refresh its footer live.
   let emitStateChanged: (sessionID: string, state: string, consecutive: number) => Promise<void> = async () => {}
-  const rpcContract = {
-    id: AUTOCONTINUE_RPC_ID,
-    methods: {
-      set: {
-        input: { type: "object", properties: { sessionID: { type: "string" }, enabled: { type: "boolean" } }, required: ["sessionID", "enabled"], additionalProperties: false },
-        output: { type: "object", properties: { state: { type: "string" } }, required: ["state"], additionalProperties: false },
-      },
-      status: {
-        input: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
-        output: { type: "object", properties: { watched: { type: "boolean" }, state: { type: "object" } }, required: ["watched"], additionalProperties: false },
-      },
-      list: {
-        input: { type: "object", additionalProperties: false },
-        output: { type: "object", properties: { sessions: { type: "array" } }, required: ["sessions"], additionalProperties: false },
-      },
-    },
-    events: {
-      "state.changed": {
-        schema: {
-          type: "object",
-          properties: {
-            sessionID: { type: "string" },
-            state: { type: "string" },
-            consecutive: { type: "number" },
-          },
-          required: ["sessionID", "state", "consecutive"],
-          additionalProperties: false,
-        },
-      },
-    },
-  }
+  const rpcContract = AUTOCONTINUE_RPC_CONTRACT
 
   const rpcImplementation = {
     async set(input: { sessionID: string; enabled: boolean }) {
