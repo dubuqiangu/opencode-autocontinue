@@ -1,6 +1,7 @@
 # opencode-autocontinue — tasks
 
 从 DESIGN.md 生成。每项小而可独立验证，标注验证方式。
+文档地图见 [docs/README.md](docs/README.md)。
 
 ## 阶段 A：骨架与 RPC ✅
 

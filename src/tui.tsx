@@ -9,7 +9,7 @@
 //     setup() call throws "Keymap.Provider is missing" on the host)
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
-import { createSignal, onCleanup } from "solid-js"
+import { createEffect, createSignal, onCleanup } from "solid-js"
 
 const RPC_ID = "autocontinue"
 
@@ -18,11 +18,22 @@ interface WatchStatusView {
   state: "watching" | "stopped" | "done"
   consecutive: number
   lastInjectedAt?: number
+  /** Epoch ms when watching started for this session (drives the sidebar timer). */
+  since?: number
 }
 
 type RpcClient = {
   set(input: { sessionID: string; enabled: boolean }): Promise<{ state: string }>
   status(input: { sessionID: string }): Promise<{ watched: boolean; state?: WatchStatusView }>
+}
+
+// "3m 22s" (≥1 min) or "45s". Clamps negative/NaN inputs to "0s".
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s"
+  const totalSeconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
 }
 
 export default Plugin.define({
@@ -103,6 +114,91 @@ export default Plugin.define({
       return <text>{label}</text>
     }
 
+    // Right-sidebar status block, mirroring opencode-usage-meter's
+    // sidebar-metrics slot. Fetches fresh per-session state over RPC into a
+    // local signal (reusing the shared rpcClient) and renders three metric
+    // lines; returns null while the session is not watched so it takes no
+    // space in the sidebar.
+    const SidebarStatus = (props: { sessionID: string }) => {
+      const [sidebarState, setSidebarState] = createSignal<WatchStatusView | undefined>(undefined)
+      const [now, setNow] = createSignal(Date.now())
+      let sidebarTimer: ReturnType<typeof setInterval> | undefined
+
+      async function refreshSidebarStatus(sessionID: string): Promise<void> {
+        const rpc = rpcClient()
+        if (!rpc) return
+        try {
+          const result = await rpc.status({ sessionID })
+          if (sessionID === props.sessionID) setSidebarState(result.state)
+        } catch {
+          if (sessionID === props.sessionID) setSidebarState(undefined)
+        }
+      }
+
+      // Refetch on session change, and whenever the watch flag/status flips
+      // (toggle on/off, state.changed events). Clears stale local state when
+      // the session is not watched anymore.
+      createEffect(() => {
+        const sessionID = props.sessionID
+        if (!sessionID) return
+        if (watched() || watchStatus() !== undefined) {
+          void refreshSidebarStatus(sessionID)
+        } else {
+          setSidebarState(undefined)
+        }
+      })
+
+      // Tick the elapsed watch timer only while this session is actively
+      // being watched; stops as soon as it leaves `watching`.
+      createEffect(() => {
+        const sessionStatus =
+          sidebarState()?.sessionID === props.sessionID
+            ? sidebarState()
+            : watchStatus()?.sessionID === props.sessionID
+              ? watchStatus()
+              : undefined
+        const ticking = watched() && sessionStatus?.state === "watching"
+        if (ticking && sidebarTimer === undefined) {
+          sidebarTimer = setInterval(() => setNow(Date.now()), 1000)
+        } else if (!ticking && sidebarTimer !== undefined) {
+          clearInterval(sidebarTimer)
+          sidebarTimer = undefined
+        }
+      })
+
+      onCleanup(() => {
+        if (sidebarTimer !== undefined) clearInterval(sidebarTimer)
+      })
+
+      if (!props.sessionID) return null
+      const globalStatus = watchStatus()?.sessionID === props.sessionID ? watchStatus() : undefined
+      const localStatus = sidebarState()?.sessionID === props.sessionID ? sidebarState() : undefined
+      const status = localStatus ?? globalStatus
+      if (!watched() && globalStatus === undefined && localStatus === undefined) return null
+      if (!status) return null
+
+      const metricLines: string[] = []
+      if (status.state === "watching") {
+        metricLines.push(
+          typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ …",
+        )
+      } else if (status.state === "stopped") {
+        metricLines.push("⏱ ⏸")
+      } else {
+        metricLines.push("⏱ ✓")
+      }
+      metricLines.push(`🔁 ${status.consecutive} 次续跑`)
+      metricLines.push(`🎯 ${status.state}`)
+
+      const muted = context.theme?.text?.muted
+      return (
+        <box flexDirection="column">
+          <text fg={(context.theme as any)?.text?.base}>值守</text>
+          <text fg={muted}>{metricLines.join("\n")}</text>
+        </box>
+      )
+    }
+
     let stopSlot: (() => void) | undefined
     try {
       const slotResult = context.ui.slot({
@@ -113,6 +209,24 @@ export default Plugin.define({
       else if (typeof slotResult === "function") stopSlot = slotResult as () => void
     } catch (error) {
       console.error("[opencode-autocontinue] footer slot failed:", error)
+    }
+
+    // Right-sidebar status block (mirrors opencode-usage-meter's
+    // sidebar-metrics slot). SidebarStatus returns null when the session is
+    // not watched, so the block occupies no space while idle.
+    let stopSidebarSlot: (() => void) | undefined
+    try {
+      const sidebarResult = context.ui.slot({
+        append: "sidebar.content",
+        render: (sidebarProps: any) =>
+          sidebarProps?.sessionID ? (
+            <SidebarStatus sessionID={sidebarProps.sessionID} />
+          ) : null,
+      })
+      if (typeof sidebarResult?.dispose === "function") stopSidebarSlot = sidebarResult.dispose
+      else if (typeof sidebarResult === "function") stopSidebarSlot = sidebarResult as () => void
+    } catch (error) {
+      console.error("[opencode-autocontinue] sidebar slot failed:", error)
     }
 
     // Slash command /autocontinue on|off|status. Registered from an `app`
@@ -223,6 +337,7 @@ export default Plugin.define({
     onCleanup(() => {
       stopEvents?.()
       stopSlot?.()
+      stopSidebarSlot?.()
       stopAppSlot?.()
       layerDispose?.()
       stopFocusRefresh?.()
@@ -231,6 +346,7 @@ export default Plugin.define({
     return () => {
       stopEvents?.()
       stopSlot?.()
+      stopSidebarSlot?.()
       stopAppSlot?.()
       layerDispose?.()
       stopFocusRefresh?.()
