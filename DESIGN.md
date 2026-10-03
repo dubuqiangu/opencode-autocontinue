@@ -106,20 +106,24 @@ opencode-autocontinue/
  │  footer 更新◀────│               │                  │              │
 ```
 
-## 4. 事件词汇（已实测/文档确认）
+## 4. 事件词汇（已对照工作插件/真实消费者核实）
 
-| 事件/钩子 | 用途 |
-|---|---|
-| `ctx.session.hook("retry", ...)` | 改瞬时错误的 retry 决策（第一道防线） |
-| `session.error` | 会话级错误（含 provider error） |
-| `message.updated` | 看 assistant 消息是否带 error、是否含完成标记 |
-| `session.idle` | 空闲（阶段完成/停摆）→ 触发续跑判定 |
-| `session.status` | 跟踪 busy/idle，防在运行中注入 |
-| `session.deleted` | 清理会话状态 |
-| `session.created` / `session.updated` | 识别会话标题（排除关键词） |
+| 事件/钩子 | 用途 | 核实来源 |
+|---|---|---|
+| `ctx.session.hook("retry", e=>e.decision)` | 改瞬时错误的 retry 决策（第一道防线） | kenryu42/open-grok-build、PatrickFanella/blacktower、cortexkit harness |
+| `ctx.session.prompt({sessionID, text})` | 注入续跑消息 | alibaba/open-code-review、Tarquinen/dynamic-context-pruning |
+| `ctx.event.subscribe({signal})` | 事件流订阅（server 侧） | herdr-agent-state（本地工作插件） |
+| `ctx.storage.get/set(key, val)` | 值守名单持久化 | CodeNomad、OrbitStart、finchtoys |
+| `ctx.rpc.register(contract, impl)` | RPC 注册（server↔TUI） | Tarquinen/dynamic-context-pruning |
+| `session.status` | 跟踪 busy/idle，防在运行中注入 | herdr-agent-state（本地工作插件） |
+| `session.error` | 会话级错误（含 provider error）→ 记 pendingContinue | herdr-agent-state |
+| `session.idle` | 空闲（阶段完成/停摆）→ 触发续跑判定 | herdr-agent-state |
+| `session.deleted` | 清理会话状态 | herdr-agent-state |
+| `message.updated` | 兜底：assistant 消息带 error / 含完成标记 | usage-meter（本地工作插件，legacy 兜底） |
+| `context.data.on(type, handler)` | TUI 侧事件订阅（返回退订函数） | usage-meter |
+| `session.execution.started/succeeded/failed/interrupted` | TUI 侧回合生命周期（备选信号） | usage-meter |
 
-> 实测注意：V2 事件载荷形状（`event.sessionID` 平铺 或 `event.properties` 嵌套）
-> 以运行时为准；`sessionIDFromEvent` 双兼容（参考 herdr 插件已确认的做法）。
+> 载荷形状实测注意：V2 事件 `event.sessionID` 平铺（`sessionIDFromEvent` 双兼容，参考 herdr 插件）。TUI 当前会话 ID 取自 `slotProps.sessionID ?? context.ui.router.current().params.sessionID`；keymap 层必须从 `app` slot render 注册（直接 setup() 调用抛 "Keymap.Provider is missing"，usage-meter v0.6.4 实测坑）。
 
 ## 5. 配置
 
@@ -129,7 +133,7 @@ opencode-autocontinue/
 {
   "enabled": true,                    // 总开关
   "message": "继续执行。审视已完成的功能是否存在bug，未实现的功能是否有安排好的执行计划",
-  "endTime": "08:30",                 // 到点全局停止（HH:MM，当天已过则次日）
+  "endTime": "08:30",                 // 每日截止（HH:MM）。watch 时冻结 endAt：当天已过则该会话立即停止值守，不滚动到次日
   "startTime": "22:00",               // 可选：早于该时间不自动续跑
   "idleDelayMs": 15000,               // 空闲后延迟注入
   "minIntervalMs": 30000,             // 同会话最小续跑间隔
