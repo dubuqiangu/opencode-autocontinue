@@ -38,7 +38,7 @@ export class WatchStore {
         }
       }
     } catch {
-      // Storage unavailable â€?run with empty list.
+      // Storage unavailable ï¿½?run with empty list.
     }
   }
 
@@ -138,6 +138,7 @@ export class WatchStore {
         state: entry.state,
         consecutive: entry.consecutive,
         lastInjectedAt: entry.lastInjectedAt,
+        since: entry.since,
       },
     }
   }
@@ -148,6 +149,7 @@ export class WatchStore {
       state: entry.state,
       consecutive: entry.consecutive,
       lastInjectedAt: entry.lastInjectedAt,
+        since: entry.since,
     }))
   }
 }

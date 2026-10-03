@@ -19,6 +19,8 @@ export interface WatchStatus {
   state: WatchState["state"]
   consecutive: number
   lastInjectedAt?: number
+  /** Epoch ms when watching started for this session (for the sidebar timer). */
+  since: number
 }
 
 export interface RpcContract {
