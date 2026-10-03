@@ -45,6 +45,12 @@ export default Plugin.define({
     const [watchStatus, setWatchStatus] = createSignal<WatchStatusView | undefined>(undefined)
     const [watched, setWatched] = createSignal(false)
 
+    // The authoritative current-session source is the footer/app slot's
+    // slotProps.sessionID (runtime-verified via usage-meter). The slash
+    // command runs outside any slot render, so it can't read slotProps;
+    // cache the last-seen sessionID here and have the command prefer it.
+    let lastSlotSessionID: string | undefined
+
     function rpcClient(): RpcClient | undefined {
       try {
         // client.rpc(contract) creates a subclient for the named RPC.
@@ -83,6 +89,7 @@ export default Plugin.define({
     function currentSessionIDFrom(slotProps?: any): string | undefined {
       return (
         slotProps?.sessionID ??
+        lastSlotSessionID ??
         (context.ui as any)?.router?.current?.()?.params?.sessionID ??
         undefined
       )
@@ -100,6 +107,7 @@ export default Plugin.define({
     // so the label updates reactively when the RPC state changes.
     const FooterIndicator = (slotProps?: any) => {
       const sessionID = currentSessionIDFrom(slotProps)
+      if (sessionID) lastSlotSessionID = sessionID
       if (!sessionID) return null
       const status = watchStatus()
       if (!watched() && status === undefined) return null
