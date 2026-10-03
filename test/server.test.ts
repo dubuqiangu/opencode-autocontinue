@@ -1,0 +1,328 @@
+// Unit tests for opencode-autocontinue server logic.
+// Run: node --test test/*.test.mjs
+
+import { test } from "node:test"
+import assert from "node:assert/strict"
+
+// --- config ---
+import { parseJsonc, DEFAULT_CONFIG, mergeConfig, buildCompletionMatcher } from "../src/config.ts"
+
+test("parseJsonc strips comments and trailing commas", () => {
+  const raw = `{
+    // line comment
+    "enabled": true,
+    "message": "继续 {time}",
+    /* block
+       comment */
+    "maxConsecutive": 5,
+  }`
+  const parsed = parseJsonc(raw)
+  assert.equal(parsed.enabled, true)
+  assert.equal(parsed.message, "继续 {time}")
+  assert.equal(parsed.maxConsecutive, 5)
+})
+
+test("parseJsonc throws on invalid jsonc", () => {
+  assert.throws(() => parseJsonc("{ not json !!! }"))
+})
+
+test("buildCompletionMatcher escapes markers and matches case-insensitively", () => {
+  const matcher = buildCompletionMatcher(DEFAULT_CONFIG)
+  assert.ok(matcher.test("[任务完成] 一切就绪"))
+  assert.ok(matcher.test("a <promise>DONE</promise> b"))
+  assert.ok(!matcher.test("ordinary summary without markers"))
+})
+
+test("mergeConfig merges only known keys with correct types", () => {
+  const merged = mergeConfig(DEFAULT_CONFIG, {
+    enabled: false,
+    message: "custom",
+    maxConsecutive: 3,
+    bogusKey: "ignored",
+    excludeTitleKeywords: ["demo", "测试"],
+  })
+  assert.equal(merged.enabled, false)
+  assert.equal(merged.message, "custom")
+  assert.equal(merged.maxConsecutive, 3)
+  assert.deepEqual(merged.excludeTitleKeywords, ["demo", "测试"])
+  assert.equal(merged.idleDelayMs, DEFAULT_CONFIG.idleDelayMs)
+})
+
+// --- events ---
+import {
+  sessionIDFromEvent,
+  isRetryableError,
+  errorToMatchString,
+  messageText,
+  hasCompletionMarker,
+  titleExcluded,
+} from "../src/events.ts"
+
+test("sessionIDFromEvent handles flat and nested shapes", () => {
+  assert.equal(sessionIDFromEvent({ type: "x", sessionID: "ses_flat" }), "ses_flat")
+  assert.equal(sessionIDFromEvent({ type: "x", properties: { sessionID: "ses_nested" } }), "ses_nested")
+  assert.equal(sessionIDFromEvent({ type: "x", data: { sessionID: "ses_data" } }), "ses_data")
+  assert.equal(sessionIDFromEvent({ type: "x" }), undefined)
+})
+
+test("errorToMatchString includes name and message", () => {
+  assert.equal(errorToMatchString({ name: "AI_Error", message: "bad_response_status_code 502" }), "AI_Error: bad_response_status_code 502")
+  assert.equal(errorToMatchString({ name: "AI_Error", data: { message: "ContextOverflow" } }), "AI_Error: ContextOverflow")
+  assert.equal(errorToMatchString("plain string"), "plain string")
+})
+
+test("isRetryableError matches retryable patterns and honors excludes", () => {
+  const patterns = ["bad_response_status_code", "ECONNRESET", "timeout"]
+  assert.ok(isRetryableError({ message: "bad_response_status_code" }, patterns, []))
+  assert.ok(isRetryableError({ message: "ECONNRESET" }, patterns, []))
+  assert.ok(!isRetryableError({ message: "user said stop" }, patterns, []))
+  assert.ok(!isRetryableError({ message: "operation was aborted" }, patterns, ["operation was aborted"]))
+})
+
+test("messageText joins text parts only", () => {
+  const parts = [
+    { type: "text", text: "hello " },
+    { type: "tool", name: "x" },
+    { type: "text", text: "world" },
+  ]
+  assert.equal(messageText(parts), "hello \nworld")
+})
+
+test("hasCompletionMarker and titleExcluded", () => {
+  const matcher = /\[任务完成\]/i
+  assert.ok(hasCompletionMarker("done: [任务完成]", matcher))
+  assert.ok(!hasCompletionMarker("still working", matcher))
+  assert.ok(titleExcluded("临时测试会话", ["测试"]))
+  assert.ok(!titleExcluded("生产会话", ["测试"]))
+})
+
+// --- prompt ---
+import { renderMessage, injectContinuation } from "../src/prompt.ts"
+
+test("renderMessage replaces {time} and {remaining}", () => {
+  const out = renderMessage("now={time}, left={remaining}", Date.now() + 2 * 3_600_000)
+  assert.match(out, /^now=.*, left=2\.0 小时$/)
+  const outMinutes = renderMessage("left={remaining}", Date.now() + 30 * 60_000)
+  assert.match(outMinutes, /^left=30 分钟$/)
+})
+
+test("injectContinuation calls session.prompt with rendered text", async () => {
+  let called: { sessionID: string; text: string } | undefined
+  const session = {
+    async prompt(input: { sessionID: string; text: string }) {
+      called = input
+    },
+  }
+  await injectContinuation(session, "ses_1", "继续 {time}", Date.now() + 60_000)
+  assert.equal(called?.sessionID, "ses_1")
+  assert.match(called?.text ?? "", /^继续 /)
+})
+
+// --- engine decision matrix ---
+import { AutocontinueEngine, computeEndAt, startTimeNotReached, retryHookHandler } from "../src/engine.ts"
+import { WatchStore } from "../src/state.ts"
+
+class FakeStorage {
+  private data = new Map<string, unknown>()
+  async get(key: string) { return this.data.get(key) }
+  async set(key: string, value: unknown) { this.data.set(key, value) }
+}
+
+function makeFakeSession() {
+  return {
+    prompts: [] as string[],
+    hooks: [] as Array<{ name: string; fn: (e: any) => void | Promise<void> }>,
+    async prompt(input: { sessionID: string; text: string }) {
+      this.prompts.push(input.text)
+    },
+    async hook(name: string, fn: (e: any) => void | Promise<void>) {
+      this.hooks.push({ name, fn })
+    },
+    async context() {
+      return [] // no messages
+    },
+  }
+}
+
+async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
+  const session = makeFakeSession()
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: Array<{ sessionID: string; state: string; consecutive: number }> = []
+  const config = () => ({ ...DEFAULT_CONFIG, ...overrides })
+  const engine = new AutocontinueEngine(session as any, config, store, (sid, state, consecutive) => {
+    events.push({ sessionID: sid, state, consecutive })
+  })
+  return { session, store, engine, events }
+}
+
+test("computeEndAt returns today's timestamp and 0 for empty", () => {
+  assert.equal(computeEndAt(""), 0)
+  const today = computeEndAt("23:59")
+  const expected = new Date()
+  expected.setHours(23, 59, 0, 0)
+  assert.equal(today, expected.getTime())
+  // A passed time still returns today's timestamp (daily cutoff semantics).
+  const past = new Date(Date.now() - 60_000)
+  const pastTime = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`
+  const pastExpected = new Date()
+  pastExpected.setHours(past.getHours(), past.getMinutes(), 0, 0)
+  assert.equal(computeEndAt(pastTime), pastExpected.getTime())
+})
+
+test("startTimeNotReached", () => {
+  // Empty = always open
+  assert.equal(startTimeNotReached(""), false)
+  // A time one minute in the future is not reached yet
+  const future = new Date(Date.now() + 60_000)
+  const futureTime = `${String(future.getHours()).padStart(2, "0")}:${String(future.getMinutes()).padStart(2, "0")}`
+  assert.equal(startTimeNotReached(futureTime), true)
+  // A time one minute in the past is reached
+  const past = new Date(Date.now() - 60_000)
+  const pastTime = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`
+  assert.equal(startTimeNotReached(pastTime), false)
+})
+
+test("retryHookHandler rewrites retryable errors with exponential backoff", () => {
+  const event = {
+    error: { type: "AI_Error", message: "bad_response_status_code", status: 502 },
+    attempt: 3,
+    decision: { retry: false },
+  }
+  retryHookHandler(() => DEFAULT_CONFIG, event as any)
+  assert.equal(event.decision.retry, true)
+  assert.equal(event.decision.delay, 2_000 * 2 ** 2) // 8s
+})
+
+test("retryHookHandler ignores excluded errors", () => {
+  const event = {
+    error: { type: "MessageAbortedError", message: "operation was aborted" },
+    attempt: 1,
+    decision: { retry: false },
+  }
+  retryHookHandler(() => DEFAULT_CONFIG, event as any)
+  assert.equal(event.decision.retry, false)
+})
+
+test("installRetryHook registers hook", async () => {
+  const { session, engine } = await makeEngine()
+  await engine.installRetryHook()
+  assert.equal(session.hooks.length, 1)
+  assert.equal(session.hooks[0].name, "retry")
+})
+
+test("idle with pending error schedules injection after idleDelayMs", async () => {
+  const { session, store, engine, events } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_1")
+  await engine.handleEvent({ type: "session.error", sessionID: "ses_1", error: { message: "bad_response_status_code" } })
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_1" })
+  // Error path enforces a 1s minimum delay.
+  await new Promise((resolve) => setTimeout(resolve, 1_100))
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0], /^继续执行/)
+  assert.equal(events.length, 1)
+  assert.equal(events[0].state, "watching")
+})
+
+test("idle without error also resumes (stage-complete)", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_2")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_2" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 1)
+})
+
+test("maxConsecutive cap stops watching", async () => {
+  const { session, store, engine, events } = await makeEngine({ idleDelayMs: 5, maxConsecutive: 2, minIntervalMs: 0 })
+  await store.watch("ses_3")
+  // Two successful injections
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_3" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_3" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 2)
+  // Third idle hits cap -> stopped, no injection
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_3" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 2)
+  const status = store.status("ses_3")
+  assert.equal(status.state?.state, "stopped")
+  assert.ok(events.some((event) => event.state === "stopped"))
+})
+
+test("completion marker in last assistant text marks done", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
+    events.push(state)
+  })
+  await store.watch("ses_4")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_4" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_4").state?.state, "done")
+  assert.ok(events.includes("done"))
+})
+
+test("title exclusion stops watching", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [{ info: { role: "user", title: "临时测试会话" } }]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_5")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_5" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_5").state?.state, "stopped")
+})
+
+test("user message within grace window delays injection", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5, userGraceMs: 60_000 })
+  await store.watch("ses_6")
+  await engine.handleEvent({
+    type: "message.updated",
+    sessionID: "ses_6",
+    properties: { info: { role: "user" } },
+  })
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_6" })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(session.prompts.length, 0) // inside grace -> rescheduled, not injected
+})
+
+test("off via rpc unwatch stops injections", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_7")
+  await store.unwatch("ses_7")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_7" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+})
+
+test("endTime reached marks stopped", async () => {
+  const past = new Date(Date.now() - 60_000)
+  const endTime = `${String(past.getHours()).padStart(2, "0")}:${String(past.getMinutes()).padStart(2, "0")}`
+  const { session, store, engine } = await makeEngine({ endTime, idleDelayMs: 5 })
+  await store.watch("ses_8", computeEndAt(endTime))
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_8" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_8").state?.state, "stopped")
+})
+
+test("retry hook rewrite uses retryHookHandler via engine", async () => {
+  const { session, engine } = await makeEngine()
+  await engine.installRetryHook()
+  const event = {
+    error: { type: "AI_Error", message: "ECONNRESET" },
+    attempt: 1,
+    decision: { retry: false },
+  }
+  await session.hooks?.[0]?.fn?.(event)
+  assert.equal(event.decision.retry, true)
+})
