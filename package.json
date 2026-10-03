@@ -10,8 +10,10 @@
   },
   "files": [
     "src",
+    "docs",
     "README.md",
-    "DESIGN.md"
+    "DESIGN.md",
+    "LICENSE"
   ],
   "keywords": [
     "opencode",
