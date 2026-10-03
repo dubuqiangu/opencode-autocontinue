@@ -1,4 +1,4 @@
-﻿// Core decision engine for opencode-autocontinue.
+// Core decision engine for opencode-autocontinue.
 // Owns the retry hook and the error/idle -> inject pipeline.
 
 import type { PluginConfig } from "./config.ts"
