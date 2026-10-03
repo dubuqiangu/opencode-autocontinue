@@ -48,24 +48,25 @@
       - 订阅 RPC `state.changed` 事件刷新；当前会话 title 排除词高亮
       - 验证：esbuild 通过
 
-## 阶段 D：验证收敛 ⏳ 待实机
+## 阶段 D：验证收敛 ⏳ 待实机（重启 opencode 后验证 TUI）
 
-- [ ] D1 本地 `file://` 加载，重启 opencode
-      - 已在 `opencode.json` 注册 `file:///D:/workSpace/python/aicode/opencode/opencode-autocontinue`（已备份 .bak.20261003_125721）
-      - `/autocontinue on` → toast+footer 出现；`status` 正确；`off` 移除
-      - 验证：实测 TUI（需重启 opencode 后）
+- [x] D1 安装方式（任务1）✅ 已按 usage-meter 同构改为包管理：
+      - `opencode plugin add github:dubuqiangu/opencode-autocontinue`（已移除 file:// 条目，避免双重加载）
+      - `plugin list` → `autocontinue ba2c3fd` = GitHub HEAD
+      - 待重启实机验证：`/autocontinue on` → toast+footer 出现；`status` 正确；`off` 移除
 - [ ] D2 续跑实测：真实造错/空闲 → 续跑消息注入；完成标记 → 停
-      - 验证：观察会话历史 + footer
+      - 验证：观察会话历史 + footer + 侧边栏 `值守` 块
 - [ ] D3 卸载/重装干净，无残留订阅
       - 验证：`plugin remove` 后无报错
 
-## 阶段 E：发布（用户决策门）⏳ 待用户确认推送
+## 阶段 E：发布 ✅ 已完成
 
 - [x] E1 推送前脱敏扫描（git ls-files：凭据形状/隐私路径/运行产物）
       - `scripts/sanitize-scan.ts` 跑通：credential/privacy CLEAN，无运行产物入库
-      - 已本地提交 90ccd47（17 文件，2001 insertions）
-- [ ] E2 用户确认推送 → git push + README 同步
-- [ ] E3 `opencode plugin update` 验证 = GitHub HEAD
+- [x] E2 推送 GitHub → `dubuqiangu/opencode-autocontinue`（public）
+      - `git push origin master`：c475d51..ba2c3fd，远端 HEAD = ba2c3fd
+- [x] E3 `opencode plugin update` 验证 = GitHub HEAD
+      - `plugin list` → `autocontinue ba2c3fd` ✅
 
 ## 附：已完成验证记录
 
