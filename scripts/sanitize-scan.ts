@@ -25,6 +25,10 @@ const patterns = [
 
 const findings = []
 for (const file of files) {
+  // Skip the scanner itself: it defines the pattern literals, so self-matches
+  // are structural (the tool's own regex text), not leaks. Pattern shapes are
+  // checked on all other tracked files.
+  if (file === "scripts/sanitize-scan.ts") continue
   const content = execSync(`git show :${file}`, { encoding: "utf-8", maxBuffer: 50 * 1024 * 1024 })
   for (const [pattern, label] of patterns) {
     const match = content.match(pattern)
