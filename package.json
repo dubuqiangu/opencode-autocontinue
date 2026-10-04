@@ -11,6 +11,7 @@
   "files": [
     "src",
     "docs",
+    "test",
     "README.md",
     "DESIGN.md",
     "LICENSE"
