@@ -141,8 +141,10 @@ export class WatchStore {
         sessionID: entry.sessionID,
         state: entry.state,
         consecutive: entry.consecutive,
-        lastInjectedAt: entry.lastInjectedAt,
-      since: entry.since,
+        // Omit lastInjectedAt when never injected: the runtime schema
+        // validator rejects undefined against {type:"number"}.
+        ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
+        since: entry.since,
       },
     }
   }
@@ -152,8 +154,8 @@ export class WatchStore {
       sessionID: entry.sessionID,
       state: entry.state,
       consecutive: entry.consecutive,
-      lastInjectedAt: entry.lastInjectedAt,
-        since: entry.since,
+      ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
+      since: entry.since,
     }))
   }
 }

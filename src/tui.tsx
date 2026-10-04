@@ -154,8 +154,10 @@ export default Plugin.define({
         if (status.state === "stopped") return `[AC ⏸ ${status.consecutive}]`
         return "[AC ●]"
       })
-      const text = label()
-      return text ? <text>{text}</text> : null
+      // Mount-time gate: hide while not watched; afterwards the JSX reads the
+      // memo getter (`{label()}`) so status changes re-render immediately.
+      if (label() === null) return null
+      return <text>{label()}</text>
     }
 
     // Right-sidebar status block, mirroring opencode-usage-meter's
@@ -214,13 +216,14 @@ export default Plugin.define({
         return metricLines.join("\n")
       })
 
-      const text = content()
-      if (text === null) return null
+      // Mount-time gate: hide while not watched; afterwards the JSX reads the
+      // memo getter (`{content()}`) so status/timer changes re-render live.
+      if (content() === null) return null
       const muted = context.theme?.text?.muted
       return (
         <box flexDirection="column">
           <text fg={(context.theme as any)?.text?.base}>Watch</text>
-          <text fg={muted}>{text}</text>
+          <text fg={muted}>{content()}</text>
         </box>
       )
     }
