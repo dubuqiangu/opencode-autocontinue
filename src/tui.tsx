@@ -1,7 +1,20 @@
 /** @jsxImportSource @opentui/solid */
 // OpenCode V2 TUI plugin "opencode-autocontinue" — slash command +
-// footer status indicator. Slash command and footer slot wrap the
-// server-side RPC (autocontinue) for per-session watch toggling.
+// footer status indicator + right-sidebar watch block.
+//
+// v0.2.0 reactivity / multi-session / i18n fix:
+//   - per-session status store (Record<sessionID, WatchStatusView>) replaces
+//     the single global watchStatus/watched signals — enabling session A no
+//     longer overwrites session B's indicator (issue 4).
+//   - all dynamic reads (status store, ticking clock) happen inside
+//     createMemo so JSX re-renders on signal change — matches usage-meter
+//     v0.7.8 ("the block looked frozen until the host re-mounted the sidebar;
+//     all dynamic reads now live inside a createMemo"). Fixes the
+//     "must switch session to see the block appear" symptom (issue 2).
+//   - English-only labels (issue 1).
+//   - slash `status` reads the RPC result directly (not a possibly-stale
+//     signal); sessionID resolution prefers the slot-cached lastSlotSessionID
+//     (authoritative) over the router during command execution (issue 3).
 //
 // Contract patterns verified against working V2 plugins on this runtime:
 //   - current sessionID: slotProps.sessionID ?? router.params.sessionID
@@ -9,7 +22,7 @@
 //     setup() call throws "Keymap.Provider is missing" on the host)
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createSignal, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
 
 const RPC_ID = "autocontinue"
@@ -40,11 +53,21 @@ function formatDuration(ms: number): string {
 export default Plugin.define({
   id: "opencode-autocontinue-tui",
   setup(context: any) {
-    // Current watch status for the focused session, driven by RPC responses
-    // and state.changed events. The footer slot component reads these, so
-    // updates re-render the indicator reactively.
-    const [watchStatus, setWatchStatus] = createSignal<WatchStatusView | undefined>(undefined)
-    const [watched, setWatched] = createSignal(false)
+    // Per-session watch status store. A session is "watched" iff its entry is
+    // defined. Populated by slash commands, RPC state.changed events,
+    // focus-change refreshes, and each sidebar's mount fetch.
+    const [statusStore, setStatusStore] = createSignal<Record<string, WatchStatusView | undefined>>({})
+    const statusOf = (sessionID: string): WatchStatusView | undefined => statusStore()[sessionID]
+    const updateStatus = (sessionID: string, status: WatchStatusView | undefined): void => {
+      setStatusStore((prev) => {
+        const current = prev[sessionID]
+        if (current === status) return prev
+        const next = { ...prev }
+        if (status === undefined) delete next[sessionID]
+        else next[sessionID] = status
+        return next
+      })
+    }
 
     // The authoritative current-session source is the footer/app slot's
     // slotProps.sessionID (runtime-verified via usage-meter). The slash
@@ -74,23 +97,24 @@ export default Plugin.define({
       if (!rpc) return
       try {
         const result = await rpc.status({ sessionID })
-        setWatched(result.watched)
-        setWatchStatus(result.state)
+        updateStatus(sessionID, result.state)
       } catch {
         // RPC may not be registered yet; fall back to unknown.
-        setWatched(false)
-        setWatchStatus(undefined)
+        updateStatus(sessionID, undefined)
       }
     }
 
     async function setEnabled(sessionID: string, enabled: boolean): Promise<string> {
       const rpc = rpcClient()
-      if (!rpc) throw new Error("autocontinue RPC 不可用")
+      if (!rpc) throw new Error("autocontinue RPC unavailable")
       const result = await rpc.set({ sessionID, enabled })
-      setWatched(enabled)
-      if (!enabled) setWatchStatus(undefined)
-      else {
-        setWatchStatus({ sessionID, state: "watching", consecutive: 0 })
+      if (enabled) {
+        updateStatus(sessionID, { sessionID, state: "watching", consecutive: 0 })
+        // Fetch the real WatchStatus (with since) so the sidebar timer starts
+        // from the server-recorded start time, not the optimistic guess.
+        void refreshStatus(sessionID)
+      } else {
+        updateStatus(sessionID, undefined)
       }
       return result.state
     }
@@ -99,8 +123,11 @@ export default Plugin.define({
       const routerSessionID = (context.ui as any)?.router?.current?.()?.params?.sessionID
       return (
         slotProps?.sessionID ??
-        (typeof routerSessionID === "string" && routerSessionID ? routerSessionID : undefined) ??
+        // Prefer the slot-cached sessionID over the router: the footer/sidebar
+        // slots always receive the authoritative sessionID, while the router
+        // may not reflect the focused session during slash-command execution.
         lastSlotSessionID ??
+        (typeof routerSessionID === "string" && routerSessionID ? routerSessionID : undefined) ??
         undefined
       )
     }
@@ -113,73 +140,50 @@ export default Plugin.define({
       }
     }
 
-    // Footer status indicator. Rendered as a component reading the signals
-    // so the label updates reactively when the RPC state changes.
+    // Footer status indicator. Rendered as a component reading the per-session
+    // status store through a memo so the label updates reactively when the
+    // RPC state changes (usage-meter v0.7.8 pattern).
     const FooterIndicator = (slotProps?: any) => {
       const sessionID = currentSessionIDFrom(slotProps)
       if (sessionID) lastSlotSessionID = sessionID
       if (!sessionID) return null
-      const status = watchStatus()
-      // The global watch signal may describe a different session (another
-      // session's events/refresh landed first). Only render the indicator
-      // when the status belongs to the session this footer is rendering for.
-      if (status !== undefined && status.sessionID !== sessionID) return null
-      if (!watched() && status === undefined) return null
-      const label =
-        status === undefined
-          ? "[AC ?]"
-          : status.state === "done"
-            ? "[AC ✓]"
-            : status.state === "stopped"
-              ? `[AC ⏸ ${status.consecutive}]`
-              : "[AC ●]"
-      return <text>{label}</text>
+      const label = createMemo(() => {
+        const status = statusOf(sessionID)
+        if (status === undefined) return null
+        if (status.state === "done") return "[AC ✓]"
+        if (status.state === "stopped") return `[AC ⏸ ${status.consecutive}]`
+        return "[AC ●]"
+      })
+      const text = label()
+      return text ? <text>{text}</text> : null
     }
 
     // Right-sidebar status block, mirroring opencode-usage-meter's
-    // sidebar-metrics slot. Fetches fresh per-session state over RPC into a
-    // local signal (reusing the shared rpcClient) and renders three metric
-    // lines; returns null while the session is not watched so it takes no
+    // sidebar-metrics slot. Renders from the shared per-session status store
+    // through a memo (live timer + reactive updates), and hydrates the store
+    // from the server on mount (throttled: the host may re-mount the sidebar
+    // often). Returns null while the session is not watched so it takes no
     // space in the sidebar.
     const SidebarStatus = (props: { sessionID: string }) => {
-      const [sidebarState, setSidebarState] = createSignal<WatchStatusView | undefined>(undefined)
       const [now, setNow] = createSignal(Date.now())
       let sidebarTimer: ReturnType<typeof setInterval> | undefined
+      let lastFetchAt = 0
 
-      async function refreshSidebarStatus(sessionID: string): Promise<void> {
-        const rpc = rpcClient()
-        if (!rpc) return
-        try {
-          const result = await rpc.status({ sessionID })
-          if (sessionID === props.sessionID) setSidebarState(result.state)
-        } catch {
-          if (sessionID === props.sessionID) setSidebarState(undefined)
-        }
-      }
-
-      // Refetch on session change, and whenever the watch flag/status flips
-      // (toggle on/off, state.changed events). Clears stale local state when
-      // the session is not watched anymore.
+      // Hydrate this session's status from the server once per mount.
       createEffect(() => {
         const sessionID = props.sessionID
         if (!sessionID) return
-        if (watched() || watchStatus() !== undefined) {
-          void refreshSidebarStatus(sessionID)
-        } else {
-          setSidebarState(undefined)
+        if (Date.now() - lastFetchAt > 2_000) {
+          lastFetchAt = Date.now()
+          void refreshStatus(sessionID)
         }
       })
 
       // Tick the elapsed watch timer only while this session is actively
       // being watched; stops as soon as it leaves `watching`.
       createEffect(() => {
-        const sessionStatus =
-          sidebarState()?.sessionID === props.sessionID
-            ? sidebarState()
-            : watchStatus()?.sessionID === props.sessionID
-              ? watchStatus()
-              : undefined
-        const ticking = watched() && sessionStatus?.state === "watching"
+        const status = statusOf(props.sessionID)
+        const ticking = status?.state === "watching"
         if (ticking && sidebarTimer === undefined) {
           sidebarTimer = setInterval(() => setNow(Date.now()), 1000)
         } else if (!ticking && sidebarTimer !== undefined) {
@@ -192,31 +196,31 @@ export default Plugin.define({
         if (sidebarTimer !== undefined) clearInterval(sidebarTimer)
       })
 
-      if (!props.sessionID) return null
-      const globalStatus = watchStatus()?.sessionID === props.sessionID ? watchStatus() : undefined
-      const localStatus = sidebarState()?.sessionID === props.sessionID ? sidebarState() : undefined
-      const status = localStatus ?? globalStatus
-      if (!watched() && globalStatus === undefined && localStatus === undefined) return null
-      if (!status) return null
+      const content = createMemo(() => {
+        const status = statusOf(props.sessionID)
+        if (status === undefined) return null
+        const metricLines: string[] = []
+        if (status.state === "watching") {
+          metricLines.push(
+            typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ …",
+          )
+        } else if (status.state === "stopped") {
+          metricLines.push("⏱ ⏸")
+        } else {
+          metricLines.push("⏱ ✓")
+        }
+        metricLines.push(`🔁 ${status.consecutive} resume${status.consecutive === 1 ? "" : "s"}`)
+        metricLines.push(`🎯 ${status.state}`)
+        return metricLines.join("\n")
+      })
 
-      const metricLines: string[] = []
-      if (status.state === "watching") {
-        metricLines.push(
-          typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ …",
-        )
-      } else if (status.state === "stopped") {
-        metricLines.push("⏱ ⏸")
-      } else {
-        metricLines.push("⏱ ✓")
-      }
-      metricLines.push(`🔁 ${status.consecutive} 次续跑`)
-      metricLines.push(`🎯 ${status.state}`)
-
+      const text = content()
+      if (text === null) return null
       const muted = context.theme?.text?.muted
       return (
         <box flexDirection="column">
-          <text fg={(context.theme as any)?.text?.base}>值守</text>
-          <text fg={muted}>{metricLines.join("\n")}</text>
+          <text fg={(context.theme as any)?.text?.base}>Watch</text>
+          <text fg={muted}>{text}</text>
         </box>
       )
     }
@@ -266,38 +270,46 @@ export default Plugin.define({
                 commands: [
                   {
                     id: "opencode-autocontinue.toggle",
-                    title: "Autocontinue: 管理当前会话值守",
+                    title: "Autocontinue: manage watch for current session",
                     group: "Autocontinue",
                     palette: true,
                     slash: { name: "autocontinue", aliases: ["ac"], arguments: true },
                     run: async (input: string) => {
                       const sessionID = currentSessionIDFrom()
                       if (!sessionID) {
-                        showToast("Autocontinue", "没有当前会话", "warning")
+                        showToast("Autocontinue", "No current session", "warning")
                         return
                       }
                       const args = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase()
                       try {
                         if (args === "on") {
                           const state = await setEnabled(sessionID, true)
-                          showToast("Autocontinue", `值守已开启 (${state})`, "success")
+                          showToast("Autocontinue", `Watch enabled (${state})`, "success")
                         } else if (args === "off") {
                           await setEnabled(sessionID, false)
-                          showToast("Autocontinue", "值守已关闭", "success")
+                          showToast("Autocontinue", "Watch disabled", "success")
                         } else if (args === "status" || !args) {
-                          await refreshStatus(sessionID)
-                          const status = watchStatus()
-                          const message = status
-                            ? `值守中 · ${status.state} · 已续跑 ${status.consecutive} 次`
-                            : "未值守"
-                          showToast("Autocontinue", message, "info")
+                          const rpc = rpcClient()
+                          if (!rpc) throw new Error("autocontinue RPC unavailable")
+                          const result = await rpc.status({ sessionID })
+                          if (result.watched && result.state) {
+                            updateStatus(sessionID, result.state)
+                            showToast(
+                              "Autocontinue",
+                              `Watching · ${result.state.state} · ${result.state.consecutive} resume${result.state.consecutive === 1 ? "" : "s"}`,
+                              "info",
+                            )
+                          } else {
+                            updateStatus(sessionID, undefined)
+                            showToast("Autocontinue", "Not watching", "info")
+                          }
                         } else {
-                          showToast("Autocontinue", "用法: /autocontinue on|off|status", "warning")
+                          showToast("Autocontinue", "Usage: /autocontinue on|off|status", "warning")
                         }
                       } catch (error) {
                         showToast(
                           "Autocontinue",
-                          `操作失败: ${String((error as Error)?.message ?? error)}`,
+                          `Operation failed: ${String((error as Error)?.message ?? error)}`,
                           "error",
                         )
                       }
@@ -333,16 +345,14 @@ export default Plugin.define({
           const state = event?.data?.state ?? event?.properties?.state
           const consecutive = event?.data?.consecutive ?? event?.properties?.consecutive ?? 0
           if (typeof sessionID !== "string") return
-          const current = currentSessionIDFrom()
           if (state === "stopped") {
             // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
             // 用 RPC status 复查区分：unwatch 后 status.watched=false → 清空本地信号。
             void refreshStatus(sessionID)
-          } else {
-            // watching / done：只更新信号；非当前焦点会话的事件不写全局信号。
-            if (sessionID !== current) return
-            setWatched(true)
-            setWatchStatus({ sessionID, state, consecutive })
+          } else if (state === "watching" || state === "done") {
+            // Per-session store: events for any watched session update only
+            // that session's entry — no cross-session overwrite.
+            updateStatus(sessionID, { sessionID, state, consecutive })
           }
         })
         if (typeof unsubscribe === "function") stopEvents = unsubscribe
@@ -351,7 +361,7 @@ export default Plugin.define({
       console.error("[opencode-autocontinue] rpc event subscription failed:", error)
     }
 
-    // Refresh footer when the focused session changes.
+    // Refresh the focused session's status when the focused session changes.
     let stopFocusRefresh: (() => void) | undefined
     try {
       const router = (context.ui as any)?.router

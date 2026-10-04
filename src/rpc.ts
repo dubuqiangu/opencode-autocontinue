@@ -43,7 +43,21 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
       },
       output: {
         type: "object",
-        properties: { watched: { type: "boolean" }, state: { type: "object" } },
+        properties: {
+          watched: { type: "boolean" },
+          state: {
+            type: "object",
+            properties: {
+              sessionID: { type: "string" },
+              state: { type: "string" },
+              consecutive: { type: "number" },
+              lastInjectedAt: { type: "number" },
+              since: { type: "number" },
+            },
+            required: ["sessionID", "state", "consecutive", "since"],
+            additionalProperties: false,
+          },
+        },
         required: ["watched"],
         additionalProperties: false,
       },

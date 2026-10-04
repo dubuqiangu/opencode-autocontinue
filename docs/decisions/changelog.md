@@ -7,3 +7,4 @@
 | 2026-10-03 | 阶段 E | 待发布：推送前脱敏扫描、GitHub 发布、plugin update 验证 |
 | 2026-10-03 | 文档 | 文档体系重构：DESIGN.md 单文件 → `docs/` 总览 + guides/features/architecture/decisions 分类分文件，根 README 瘦身为入口页。纯文档变更，无代码改动 |
 | 2026-10-03 | 审计修复 | 深度审查修复（S1-S5 + M3/M4/M5/M7）：TUI 跨会话信号污染、off 后 footer 残留、跨午夜窗口、空 markers 匹配一切、inFlight 竞态、单引号 JSONC、resume 闩锁、error status 匹配。单测 25→35，esbuild 双绿 |
+| 2026-10-04 | 0.2.0 | TUI 值守块修复：每会话独立状态表替代全局信号（多会话同时值守互不覆盖）；动态读全部移入 createMemo（侧栏/footer 立即刷新，无需切 session）；RPC status 输出 schema 全声明字段（`since` 透传，侧栏时长正确显示）；slash `status` 直接读 RPC 结果；`currentSessionIDFrom` 优先 slot 缓存的 lastSlotSessionID；TUI 显示全英文（Watch / resumes）。另修复 RPC client contract 必须声明 methods（`rpc.set is not a function` 根因） |

@@ -1,6 +1,6 @@
 {
   "name": "opencode-autocontinue",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode V2 plugin: auto-resume sessions interrupted before the overall task is done (model errors like bad_response_status_code, stage-complete idle, network blips). Per-session manual opt-in via /autocontinue, TUI footer status, retry hook, configurable message/time-window/limits.",
   "type": "module",
   "main": "src/index.ts",

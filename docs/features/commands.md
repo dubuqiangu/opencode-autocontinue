@@ -17,12 +17,12 @@ TUI keymap slash 命令（/autocontinue on）
   → rpc.set({ enabled: true })          ← RPC id "autocontinue"
   → server 持久化到 ctx.storage
   → 事件 autocontinue.state.changed 广播
-  → TUI toast「值守已开启」+ footer 刷新
+  → TUI toast「Watch enabled」+ footer/侧栏刷新
 ```
 
-- `on`：watch(sessionID)，写入 storage，计数归零
-- `off`：unwatch(sessionID)，删除 storage 记录
-- `status`：读取当前会话状态（值守中 / 已完成 / 已停止 + 次数）
+- `on`：watch(sessionID)，写入 storage，计数归零；toast「Watch enabled」
+- `off`：unwatch(sessionID)，删除 storage 记录；toast「Watch disabled」
+- `status`：直接调 RPC 读当前会话状态（非经过期信号），`Watching · <state> · N resumes` / `Not watching`
 
 ## RPC 契约
 

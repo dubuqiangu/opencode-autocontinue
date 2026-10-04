@@ -4,8 +4,9 @@
 
 | 方向 | 形态 |
 |---|---|
-| 会话级手动开关 | `/autocontinue on\|off\|status` |
+| 会话级手动开关 | `/autocontinue on\|off\|status`（每会话独立，多会话同时值守互不覆盖） |
 | footer 状态指示 | `[AC ●]` / `[AC ✓]` / `[AC ⏸ N]` |
+| 右侧栏值守块 | `Watch` 块：⏱ 时长 + 🔁 续跑次数 + 🎯 状态（全英文） |
 | 自动续跑引擎 | retry 第一道防线 + 错误/空闲注入 + 完成/次数/时段停止 |
 | 配置系统 | 全局 + 项目覆盖，deep merge，JSONC/BOM 容错 |
 | 值守持久化 | `ctx.storage`，跨重启恢复 |

@@ -5,12 +5,12 @@ OpenCode V2 插件：自动续跑「总任务未完成就被中断」的会话�
 ## 效果示意
 
 ```text
-/autocontinue on      → toast「值守已开启」 + footer [AC ●] + 侧边栏「值守 ⏱ …」
-/autocontinue status  → 值守中 · watching · 已续跑 0 次
-/autocontinue off     → footer 指示消失、侧边栏块隐藏
+/autocontinue on      → toast "Watch enabled" + footer [AC ●] + sidebar "Watch"
+/autocontinue status  → Watching · watching · 0 resumes
+/autocontinue off     → footer indicator gone, sidebar block hidden
 
-footer:  [AC ●] 值守中 | [AC ✓] 完成 | [AC ⏸ N] 停止(已续跑 N 次)
-侧边栏:  值守 ─ ⏱ 3m 22s / 🔁 5 次续跑 / 🎯 watching
+footer:  [AC ●] watching | [AC ✓] done | [AC ⏸ N] stopped (N resumes)
+sidebar: Watch ─ ⏱ 3m 22s / 🔁 5 resumes / 🎯 watching
 ```
 
 ## 关键特性
@@ -57,8 +57,8 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue   # 卸载
 
 | 功能 | 入口 | 说明 |
 |---|---|---|
-| footer 状态指示 | 自动 | `[AC ●]` 值守中 / `[AC ✓]` 完成 / `[AC ⏸ N]` 停止（[docs/features/footer.md](docs/features/footer.md)） |
-| 侧边栏「值守」块 | 自动 | `⏱ 值守时长 / 🔁 续跑次数 / 🎯 状态`（[docs/features/footer.md](docs/features/footer.md)） |
+| footer 状态指示 | 自动 | `[AC ●]` watching / `[AC ✓]` done / `[AC ⏸ N]` stopped（[docs/features/footer.md](docs/features/footer.md)） |
+| 侧边栏 Watch 块 | 自动 | `⏱ 时长 / 🔁 resumes / 🎯 state` 全英文（[docs/features/footer.md](docs/features/footer.md)） |
 | slash 命令 | `/autocontinue on\|off\|status` | 每会话值守开关（[docs/features/commands.md](docs/features/commands.md)） |
 | 自动续跑引擎 | 自动 | retry 第一道防线 + 事件驱动注入，含全部停止条件（[docs/features/engine.md](docs/features/engine.md)） |
 | 配置系统 | 配置文件 | 全局 + 项目覆盖，deep merge，BOM 容错 JSONC（[docs/features/config.md](docs/features/config.md)） |

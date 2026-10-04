@@ -28,7 +28,7 @@ opencode plugin add github:<owner>/opencode-autocontinue
 
 1. 重启 opencode（或 `opencode service restart` 后重开 TUI）
 2. `opencode plugin list` 中能看到 `opencode-autocontinue`
-3. 会话内 `/autocontinue on` → toast「值守已开启」+ footer 出现 `[AC ●]`
+3. 会话内 `/autocontinue on` → toast "Watch enabled" + footer 出现 `[AC ●]`
 4. `/autocontinue status` 显示值守状态；`/autocontinue off` 移除
 
 若命令无效：日志 `~/.local/share/opencode/log/opencode.log` 过滤插件加载错误。
