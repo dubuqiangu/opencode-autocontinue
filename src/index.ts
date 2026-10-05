@@ -55,6 +55,10 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
       } else {
         await store.unwatch(input.sessionID)
         engine.stopKeepAlive(input.sessionID)
+        // P2-3: cancel any pending injection timeout so it cannot fire after
+        // unwatch (then re-watch before it fires would inject spuriously).
+        engine.clearTimer(input.sessionID)
+        engine.forgetSession(input.sessionID)
       }
       const entry = store.getState(input.sessionID)
       const state = entry?.state ?? (input.enabled ? "watching" : "stopped")

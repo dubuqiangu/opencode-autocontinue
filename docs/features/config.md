@@ -23,7 +23,7 @@
 | `excludePatterns` | `["MessageAbortedError", "operation was aborted"]` | 永不自动续跑（用户主动中止） |
 | `excludeTitleKeywords` | `["测试"]` | 标题含这些词不续跑 |
 | `userGraceMs` | `300000` | 用户最近发真实消息后 N ms 内不自动续跑 |
-| `intervalMs` | `3600000` | 保活心跳间隔（ms），`0` = 关闭。每间隔向值守中的会话注入一次 `intervalMessage`（仅当会话空闲、模型近 60s 无 busy、无恢复注入在途、未命中完成标记）；**不递增 `consecutive`**（心跳≠重试） |
+| `intervalMs` | `3600000` | 保活心跳间隔（ms），`0` = 关闭（配置下限钳制为 `1000`）。每间隔向值守中的会话注入一次 `intervalMessage`（仅当会话空闲、模型近 60s 无 busy、无恢复注入在途、未命中完成标记、且在值守窗口内）；**不递增 `consecutive`**（心跳≠重试） |
 | `intervalMessage` | `继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。` | 保活心跳话术，独立于 `message` |
 
 ## 完整示例

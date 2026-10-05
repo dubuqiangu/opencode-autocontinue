@@ -22,7 +22,7 @@
 //     setup() call throws "Keymap.Provider is missing" on the host)
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
 import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
 
 const RPC_ID = "autocontinue"
@@ -146,9 +146,11 @@ export default Plugin.define({
       }
     }
 
-    // Footer status indicator. Rendered as a component reading the per-session
-    // status store through a memo so the label updates reactively when the
-    // RPC state changes (usage-meter v0.7.8 pattern).
+    // Footer status indicator. The `<Show when={...}>` wrapper keeps the
+    // component mounted even while the session is unwatched, so the label can
+    // APPEAR the moment the status flips to defined — a mount-time null return
+    // would unmount the subtree and never re-render (Solid component bodies run
+    // once per mount). The memo keeps label updates reactive.
     const FooterIndicator = (slotProps?: any) => {
       const sessionID = currentSessionIDFrom(slotProps)
       if (sessionID) lastSlotSessionID = sessionID
@@ -160,10 +162,11 @@ export default Plugin.define({
         if (status.state === "stopped") return `[AC ⏸ ${status.consecutive}]`
         return "[AC ●]"
       })
-      // Mount-time gate: hide while not watched; afterwards the JSX reads the
-      // memo getter (`{label()}`) so status changes re-render immediately.
-      if (label() === null) return null
-      return <text>{label()}</text>
+      return (
+        <Show when={label() !== null}>
+          <text>{label()}</text>
+        </Show>
+      )
     }
 
     // Right-sidebar status block, mirroring opencode-usage-meter's
@@ -222,15 +225,18 @@ export default Plugin.define({
         return metricLines.join("\n")
       })
 
-      // Mount-time gate: hide while not watched; afterwards the JSX reads the
-      // memo getter (`{content()}`) so status/timer changes re-render live.
-      if (content() === null) return null
+      // P2-9: wrap in <Show when={...}> instead of a mount-time null return —
+      // the wrapper keeps this component mounted while unwatched so the block
+      // can APPEAR the moment the status flips to defined (host re-mount is no
+      // longer required). The memo keeps content updates reactive while shown.
       const muted = context.theme?.text?.muted
       return (
-        <box flexDirection="column">
-          <text fg={(context.theme as any)?.text?.base}>Watch</text>
-          <text fg={muted}>{content()}</text>
-        </box>
+        <Show when={content() !== null}>
+          <box flexDirection="column">
+            <text fg={(context.theme as any)?.text?.base}>Watch</text>
+            <text fg={muted}>{content()}</text>
+          </box>
+        </Show>
       )
     }
 

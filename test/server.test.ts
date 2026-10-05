@@ -469,3 +469,83 @@ test("keep-alive stops for a session that is no longer watching", async () => {
   await engine.tryKeepAlive("ses_k4")
   assert.equal(session.prompts.length, 0)
 })
+
+// --- regression tests for review findings (P1/P2/P3 batch) ---
+
+test("keep-alive does not inject outside the time window (P1-1)", async () => {
+  // Watch with an endAt already in the past: the heartbeat must stop the
+  // session instead of injecting past the window.
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k5", Date.now() - 1_000)
+  await engine.tryKeepAlive("ses_k5")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_k5")?.state, "stopped")
+})
+
+test("keep-alive holds inFlight across the completion check (P1-2)", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k6")
+  // Stale pendingContinue latch must NOT block the heartbeat after the
+  // retry-window grace, but a fresh one must.
+  store.getMemory("ses_k6").pendingContinue = true
+  store.getMemory("ses_k6").pendingContinueAt = Date.now() - 60_000
+  await engine.tryKeepAlive("ses_k6")
+  assert.equal(session.prompts.length, 1)
+})
+
+test("keep-alive respects a fresh pendingContinue latch (P2-8)", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k7")
+  store.getMemory("ses_k7").pendingContinue = true
+  store.getMemory("ses_k7").pendingContinueAt = Date.now()
+  await engine.tryKeepAlive("ses_k7")
+  assert.equal(session.prompts.length, 0)
+})
+
+test("hydrate normalizes legacy rows missing since/consecutive (P2-1)", async () => {
+  const storage = new FakeStorage() as any
+  // Simulate old-version persisted data lacking since/consecutive and carrying
+  // a null lastInjectedAt (JSON round-trip of an explicit null).
+  await storage.set("opencode-autocontinue.watched", {
+    ses_old: { sessionID: "ses_old", state: "watching", lastInjectedAt: null },
+  })
+  const store = new WatchStore(storage)
+  await store.hydrate()
+  const state = store.status("ses_old")
+  assert.equal(state.watched, true)
+  assert.equal(typeof state.state?.since, "number")
+  assert.equal(state.state?.consecutive, 0)
+  // lastInjectedAt must be omitted (null/undefined would fail the RPC schema).
+  assert.equal(state.state?.lastInjectedAt, undefined)
+})
+
+test("resolveTitle does not cache an empty title (P2-4)", async () => {
+  const { session, store, engine } = await makeEngine()
+  await store.watch("ses_old2")
+  // First call: no title present -> no cache write, returns undefined.
+  session.context = async () => [{ info: { role: "user" }, parts: [] }]
+  const first = await engine.resolveTitle("ses_old2")
+  assert.equal(first, undefined)
+  // Second call: title now appears -> must be re-resolved (not served from a
+  // poisoned "" cache).
+  session.context = async () => [{ info: { role: "user", title: "测试任务" }, parts: [] }]
+  const second = await engine.resolveTitle("ses_old2")
+  assert.equal(second, "测试任务")
+})
+
+test("mergeConfig clamps intervalMs to a minimum of 1s (P2-7)", () => {
+  const merged = mergeConfig(DEFAULT_CONFIG, { intervalMs: 10 })
+  assert.equal(merged.intervalMs, 1_000)
+})
+
+test("renderMessage renders 不限 when there is no time window (P3-3)", () => {
+  const text = renderMessage("剩余 {remaining}", 0)
+  assert.match(text, /不限/)
+})
+
+test("default errorPatterns match 5xx via (status: 5) not bare 5 (P3-4)", () => {
+  // Bare "5" is gone: a plain "5" in a message no longer counts as retryable.
+  assert.equal(isRetryableError({ message: "got 5 results" }, DEFAULT_CONFIG.errorPatterns, []), false)
+  // A 5xx status still matches through the "(status: 5" prefix.
+  assert.equal(isRetryableError({ name: "AI_Error", status: 503 }, DEFAULT_CONFIG.errorPatterns, []), true)
+})

@@ -100,6 +100,8 @@ export class AutocontinueEngine {
   private readonly intervalTimers = new Map<string, ReturnType<typeof setInterval>>()
   private disposed = false
   private titleCache = new Map<string, string>()
+  /** Per-session last completion-check time (P2-6 throttle). */
+  private lastCompletionCheckAt = new Map<string, number>()
 
   constructor(
     session: SessionLike,
@@ -133,12 +135,22 @@ export class AutocontinueEngine {
     this.timers.set(sessionID, timer)
   }
 
-  private clearTimer(sessionID: string): void {
+  /** Cancel any pending injection timeout for a session (used by the RPC
+   *  off path so a scheduled injection cannot fire after unwatch). */
+  clearTimer(sessionID: string): void {
     const timer = this.timers.get(sessionID)
     if (timer) {
       clearTimeout(timer)
       this.timers.delete(sessionID)
     }
+  }
+
+  /** Drop per-session caches (title, completion-check throttle). Called on
+   *  unwatch / session.deleted so memory does not grow and a re-watched
+   *  session re-resolves a fresh title. */
+  forgetSession(sessionID: string): void {
+    this.titleCache.delete(sessionID)
+    this.lastCompletionCheckAt.delete(sessionID)
   }
 
   /** Start the per-session keep-alive interval timer. No-op when disabled. */
@@ -170,9 +182,10 @@ export class AutocontinueEngine {
 
   /** Periodic heartbeat: inject intervalMessage into an idle watching session.
    *  Skips while a recovery is in flight / pending, while the model has been
-   *  active recently, inside the user grace window, or when the latest
-   *  assistant message carries a completion marker (task truly done). Does not
-   *  increment consecutive — it is a heartbeat, not a retry. */
+   *  active recently, inside the user grace window, when the time window is
+   *  closed, or when the latest assistant message carries a completion marker
+   *  (task truly done). Does not increment consecutive — it is a heartbeat, not
+   *  a retry. */
   private async tryKeepAlive(sessionID: string): Promise<void> {
     const cfg = this.config()
     if (this.disposed || !cfg.enabled || cfg.intervalMs <= 0) return
@@ -182,31 +195,58 @@ export class AutocontinueEngine {
       return
     }
     const memory = this.store.getMemory(sessionID)
-    // A recovery injection is in flight — let it own the conversation.
-    if (memory.inFlight) return
-    // An error recovery is pending — the error path will handle it.
-    if (memory.pendingContinue) return
-    // Model active recently (busy/retry within the last 60s) — don't interrupt.
-    if (memory.lastBusyAt && Date.now() - memory.lastBusyAt < 60_000) return
-    // User just sent a real message — respect the grace window.
-    if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
-    // Task genuinely done — stop the heartbeat, don't inject.
-    const matcher = buildCompletionMatcher(cfg)
-    if (matcher) {
-      try {
-        const latestText = await this.latestAssistantText(sessionID)
-        if (hasCompletionMarker(latestText, matcher)) {
-          this.stopKeepAlive(sessionID)
-          return
-        }
-      } catch {
-        // Proceed on context-read failure (defensive).
+    // An error recovery is pending — the error path will handle it. But a stale
+    // latch (error long ago, no idle ever arrived) must not suppress the
+    // heartbeat forever: clear it after the retry-window grace.
+    if (memory.pendingContinue) {
+      const staleAt = memory.pendingContinueAt
+      if (staleAt && Date.now() - staleAt > Math.max(cfg.idleDelayMs, 30_000)) {
+        memory.pendingContinue = false
+        memory.pendingContinueAt = 0
+      } else {
+        return
       }
     }
+    // P1-1: mirror tryInject's time-window gate. A heartbeat must not inject
+    // outside the configured start/end window — that would break night-watch
+    // sessions whose state is still "watching" but whose endAt has passed.
+    if (startTimeNotReached(cfg.startTime)) return
+    if (entry.endAt && Date.now() >= entry.endAt) {
+      await this.store.markStopped(sessionID)
+      this.stopKeepAlive(sessionID)
+      void this.emitChangedInternal(sessionID, "stopped")
+      return
+    }
+    // P1-2: hold the same inFlight lock tryInject uses, across the async
+    // completion-marker check below. Otherwise two heartbeat ticks (or a
+    // heartbeat + a recovery injection) can both pass the lock check and inject
+    // back-to-back in the TOCTOU window of `await latestAssistantText`.
+    if (memory.inFlight) return
+    memory.inFlight = true
     try {
+      // Model active recently (busy/retry within the last 60s) — don't interrupt.
+      if (memory.lastBusyAt && Date.now() - memory.lastBusyAt < 60_000) return
+      // User just sent a real message — respect the grace window.
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
+      // Task genuinely done — stop the heartbeat, don't inject.
+      const matcher = buildCompletionMatcher(cfg)
+      if (matcher) {
+        try {
+          const latestText = await this.latestAssistantText(sessionID)
+          if (hasCompletionMarker(latestText, matcher)) {
+            this.stopKeepAlive(sessionID)
+            return
+          }
+        } catch {
+          // Proceed on context-read failure (defensive).
+        }
+      }
+      if (this.disposed) return
       await injectContinuation(this.session, sessionID, cfg.intervalMessage, entry.endAt ?? 0)
     } catch (error) {
       console.error("[opencode-autocontinue] keep-alive injection failed:", error)
+    } finally {
+      memory.inFlight = false
     }
   }
 
@@ -277,9 +317,12 @@ export class AutocontinueEngine {
         }
       }
 
-      // 注入前复查：上面 await 期间 session 可能已被 unwatch / markDone / markStopped。
+      // 注入前复查：上面 await 期间 session 可能已被 unwatch / markDone /
+      // markStopped，或用户已发真实消息（P2-2）。逐项复核，避免注入打断用户输入。
+      if (this.disposed) return
       const freshEntry = this.store.getState(sessionID)
       if (!freshEntry || freshEntry.state !== "watching") return
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
 
       await injectContinuation(this.session, sessionID, cfg.message, freshEntry.endAt ?? 0)
       await this.store.recordInjection(sessionID)
@@ -316,7 +359,10 @@ export class AutocontinueEngine {
         info?: { role?: string; title?: string }
       }>
       const title = messages.find((message) => typeof message.info?.title === "string")?.info?.title
-      this.titleCache.set(sessionID, title ?? "")
+      // P2-4: only cache when a title actually exists. Caching "" (or undefined)
+      // would permanently exempt a session that later gains an excluded title
+      // (e.g. "测试") from the title filter for the rest of the process.
+      if (typeof title === "string" && title) this.titleCache.set(sessionID, title)
       return title
     } catch {
       return undefined
@@ -354,6 +400,7 @@ export class AutocontinueEngine {
         const error = event.properties?.error ?? event.error
         if (isRetryableError(error, cfg.errorPatterns, cfg.excludePatterns)) {
           memory.pendingContinue = true
+          memory.pendingContinueAt = Date.now()
         }
         break
       }
@@ -369,12 +416,13 @@ export class AutocontinueEngine {
         break
       }
       case "message.updated": {
-        const info = event.properties?.info
+        // P2-5: accept both nested and flat info (session.status/error already do).
+        const info = event.properties?.info ?? event.info
         if (!info || typeof info !== "object") break
         const role = (info as { role?: string }).role
         if (role === "user") {
           memory.lastUserMessageAt = Date.now()
-          await this.store.resume(sessionID)
+          await this.store.resume(sessionID, true)
           this.scheduleKeepAlive(sessionID)
           void this.emitChangedInternal(sessionID, "watching")
           break
@@ -386,17 +434,27 @@ export class AutocontinueEngine {
             break
           }
           const messageID = sessionIDFromMessageInfo(info as Record<string, unknown>)
-          if (messageID) {
-            const matcher = buildCompletionMatcher(cfg)
-            if (matcher) {
-              const text = await this.latestAssistantText(sessionID)
-              if (hasCompletionMarker(text, matcher)) {
-                await this.store.markDone(sessionID)
-                this.clearTimer(sessionID)
-                this.stopKeepAlive(sessionID)
-                void this.emitChangedInternal(sessionID, "done")
-              }
+          if (!messageID) break
+          const matcher = buildCompletionMatcher(cfg)
+          if (!matcher) break
+          // P2-6: throttle the full-context completion check — streaming hosts
+          // emit many message.updated events per message; pulling session
+          // context on each one would stall the event loop. The idle path's
+          // tryInject re-checks completion right before any real injection, so
+          // a throttled check here only delays detection, never misses it.
+          const lastCheck = this.lastCompletionCheckAt.get(sessionID) ?? 0
+          if (Date.now() - lastCheck < 2_000) break
+          this.lastCompletionCheckAt.set(sessionID, Date.now())
+          try {
+            const text = await this.latestAssistantText(sessionID)
+            if (hasCompletionMarker(text, matcher)) {
+              await this.store.markDone(sessionID)
+              this.clearTimer(sessionID)
+              this.stopKeepAlive(sessionID)
+              void this.emitChangedInternal(sessionID, "done")
             }
+          } catch {
+            // Context read failure — the idle path will re-check before injection.
           }
         }
         break
@@ -405,6 +463,7 @@ export class AutocontinueEngine {
         this.store.unwatch(sessionID).catch(() => {})
         this.clearTimer(sessionID)
         this.stopKeepAlive(sessionID)
+        this.forgetSession(sessionID)
         break
       }
       default:
@@ -418,5 +477,7 @@ export class AutocontinueEngine {
     this.timers.clear()
     for (const timer of this.intervalTimers.values()) clearInterval(timer)
     this.intervalTimers.clear()
+    this.titleCache.clear()
+    this.lastCompletionCheckAt.clear()
   }
 }

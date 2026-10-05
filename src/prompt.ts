@@ -8,11 +8,14 @@ export interface SessionPromptLike {
 export function renderMessage(template: string, endAt: number): string {
   const now = new Date()
   const time = now.toLocaleString("zh-CN", { hour12: false })
-  const remainingMs = Math.max(0, endAt - now.getTime())
+  // P3-3: no window (endAt = 0) means there is no remaining time to report.
+  const remainingMs = endAt > 0 ? Math.max(0, endAt - now.getTime()) : null
   const remaining =
-    remainingMs >= 3_600_000
-      ? `${(remainingMs / 3_600_000).toFixed(1)} 小时`
-      : `${Math.max(1, Math.round(remainingMs / 60_000))} 分钟`
+    remainingMs === null
+      ? "不限"
+      : remainingMs >= 3_600_000
+        ? `${(remainingMs / 3_600_000).toFixed(1)} 小时`
+        : `${Math.max(1, Math.round(remainingMs / 60_000))} 分钟`
   return template.replace(/\{time\}/g, time).replace(/\{remaining\}/g, remaining)
 }
 

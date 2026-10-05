@@ -57,7 +57,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
     "bad_response_status_code",
     "bad request",
     "429",
-    "5",
+    "(status: 5",
     "ECONNRESET",
     "ECONNREFUSED",
     "timeout",
@@ -166,7 +166,7 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
     )
   }
   if (typeof overrides.userGraceMs === "number") merged.userGraceMs = overrides.userGraceMs
-  if (typeof overrides.intervalMs === "number") merged.intervalMs = overrides.intervalMs
+  if (typeof overrides.intervalMs === "number") merged.intervalMs = Math.max(1_000, overrides.intervalMs)
   if (typeof overrides.intervalMessage === "string" && overrides.intervalMessage) {
     merged.intervalMessage = overrides.intervalMessage
   }

@@ -13,6 +13,8 @@ const STORAGE_KEY = "opencode-autocontinue.watched"
 export interface InMemoryState {
   inFlight: boolean
   pendingContinue: boolean
+  /** Epoch ms when pendingContinue was set (staleness check for the latch). */
+  pendingContinueAt: number
   lastUserMessageAt: number
   lastBusyAt: number
 }
@@ -31,10 +33,20 @@ export class WatchStore {
     try {
       const saved = (await this.storage.get(STORAGE_KEY)) as Record<string, WatchState> | undefined
       if (saved && typeof saved === "object") {
+        const now = Date.now()
         for (const [sessionID, entry] of Object.entries(saved)) {
-          if (entry && typeof entry.sessionID === "string") {
-            this.watched.set(sessionID, { ...entry, sessionID })
-          }
+          if (!entry || typeof entry.sessionID !== "string") continue
+          // Normalize legacy rows: old persisted data may lack since/consecutive
+          // or carry null lastInjectedAt, which would fail the RPC schema
+          // validator (status/list output must not contain undefined/null).
+          this.watched.set(sessionID, {
+            sessionID,
+            state: entry.state === "done" || entry.state === "stopped" ? entry.state : "watching",
+            consecutive: typeof entry.consecutive === "number" ? entry.consecutive : 0,
+            since: typeof entry.since === "number" ? entry.since : now,
+            endAt: typeof entry.endAt === "number" ? entry.endAt : 0,
+            ...(typeof entry.lastInjectedAt === "number" ? { lastInjectedAt: entry.lastInjectedAt } : {}),
+          })
         }
       }
     } catch {
@@ -42,14 +54,20 @@ export class WatchStore {
     }
   }
 
+  private persistChain: Promise<void> = Promise.resolve()
   private async persist(): Promise<void> {
-    try {
-      const snapshot: Record<string, WatchState> = {}
-      for (const [sessionID, entry] of this.watched) snapshot[sessionID] = { ...entry }
-      await this.storage.set(STORAGE_KEY, snapshot)
-    } catch {
-      // Non-fatal: memory keeps working for this process.
-    }
+    const snapshot: Record<string, WatchState> = {}
+    for (const [sessionID, entry] of this.watched) snapshot[sessionID] = { ...entry }
+    // Serialize writes so a slow earlier persist can't overwrite a newer
+    // snapshot built from later state (lost update across concurrent calls).
+    this.persistChain = this.persistChain.then(async () => {
+      try {
+        await this.storage.set(STORAGE_KEY, snapshot)
+      } catch {
+        // Non-fatal: memory keeps working for this process.
+      }
+    })
+    return this.persistChain
   }
 
   isWatching(sessionID: string): boolean {
@@ -63,7 +81,13 @@ export class WatchStore {
   getMemory(sessionID: string): InMemoryState {
     let memory = this.inMemory.get(sessionID)
     if (!memory) {
-      memory = { inFlight: false, pendingContinue: false, lastUserMessageAt: 0, lastBusyAt: 0 }
+      memory = {
+        inFlight: false,
+        pendingContinue: false,
+        pendingContinueAt: 0,
+        lastUserMessageAt: 0,
+        lastBusyAt: 0,
+      }
       this.inMemory.set(sessionID, memory)
     }
     return memory
@@ -112,7 +136,7 @@ export class WatchStore {
   }
 
   /** Return to watching (e.g. user re-enables, or a fresh real user message). */
-  async resume(sessionID: string): Promise<void> {
+  async resume(sessionID: string, recomputeEndAt = false): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.state = "watching"
@@ -120,7 +144,16 @@ export class WatchStore {
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
     const memory = this.inMemory.get(sessionID)
-    if (memory) memory.pendingContinue = false
+    if (memory) {
+      memory.pendingContinue = false
+      memory.pendingContinueAt = 0
+    }
+    // P2-10: 若值守窗口已过（endAt 过去），resume 不应把它翻回 watching 后又被
+    // 下一次 idle 打回 stopped（反复翻转）。调用方传 recomputeEndAt=true 时按
+    // 当前配置重算 endAt（新一轮值守窗口）。
+    if (recomputeEndAt && entry.endAt && Date.now() >= entry.endAt) {
+      entry.endAt = 0
+    }
     await this.persist()
   }
 
