@@ -149,10 +149,10 @@ async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
   const session = makeFakeSession()
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const events: Array<{ sessionID: string; state: string; consecutive: number }> = []
+  const events: Array<{ sessionID: string; state: string; consecutive: number; heartbeats: number }> = []
   const config = () => ({ ...DEFAULT_CONFIG, ...overrides })
-  const engine = new AutocontinueEngine(session as any, config, store, (sid, state, consecutive) => {
-    events.push({ sessionID: sid, state, consecutive })
+  const engine = new AutocontinueEngine(session as any, config, store, (sid, state, consecutive, heartbeats) => {
+    events.push({ sessionID: sid, state, consecutive, heartbeats })
   })
   return { session, store, engine, events }
 }
@@ -539,6 +539,22 @@ test("recordHeartbeat increments and heartbeats survives hydrate + status", asyn
   await store.watch("ses_hb2")
   // A fresh watch resets the counter.
   assert.equal(store.getState("ses_hb2")?.heartbeats, 0)
+})
+
+test("keep-alive emitChanged carries the heartbeat count (regression)", async () => {
+  const { session, store, engine, events } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_hb3")
+  await engine.tryKeepAlive("ses_hb3")
+  assert.equal(session.prompts.length, 1)
+  assert.equal(store.getState("ses_hb3")?.heartbeats, 1)
+  // The state.changed event (which the TUI uses to refresh the sidebar) must
+  // carry the fresh heartbeat count — otherwise the TUI would overwrite its
+  // local counter back to 0 on every keep-alive.
+  const last = events[events.length - 1]
+  assert.equal(last?.sessionID, "ses_hb3")
+  assert.equal(last?.state, "watching")
+  assert.equal(last?.consecutive, 0) // heartbeat does not touch consecutive
+  assert.equal(last?.heartbeats, 1)
 })
 
 test("keep-alive skips while a recovery is in flight", async () => {

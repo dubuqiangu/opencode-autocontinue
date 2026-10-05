@@ -95,7 +95,12 @@ export class AutocontinueEngine {
   private readonly session: SessionLike
   private readonly config: () => PluginConfig
   private readonly store: WatchStore
-  private readonly emitChanged: (sessionID: string, state: WatchState["state"], consecutive: number) => void
+  private readonly emitChanged: (
+    sessionID: string,
+    state: WatchState["state"],
+    consecutive: number,
+    heartbeats: number,
+  ) => void
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Per-session keep-alive interval timers (heartbeat injections). */
   private readonly intervalTimers = new Map<string, ReturnType<typeof setInterval>>()
@@ -108,7 +113,12 @@ export class AutocontinueEngine {
     session: SessionLike,
     config: () => PluginConfig,
     store: WatchStore,
-    emitChanged: (sessionID: string, state: WatchState["state"], consecutive: number) => void,
+    emitChanged: (
+      sessionID: string,
+      state: WatchState["state"],
+      consecutive: number,
+      heartbeats: number,
+    ) => void,
   ) {
     this.session = session
     this.config = config
@@ -380,7 +390,7 @@ export class AutocontinueEngine {
 
   private async emitChangedInternal(sessionID: string, state: WatchState["state"]): Promise<void> {
     const entry = this.store.getState(sessionID)
-    this.emitChanged(sessionID, state, entry?.consecutive ?? 0)
+    this.emitChanged(sessionID, state, entry?.consecutive ?? 0, entry?.heartbeats ?? 0)
   }
 
   /** Handle a single server event. */

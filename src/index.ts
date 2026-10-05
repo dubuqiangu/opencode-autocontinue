@@ -44,7 +44,12 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   await store.hydrate()
 
   // RPC events let the TUI refresh its footer live.
-  let emitStateChanged: (sessionID: string, state: string, consecutive: number) => Promise<void> = async () => {}
+  let emitStateChanged: (
+    sessionID: string,
+    state: string,
+    consecutive: number,
+    heartbeats: number,
+  ) => Promise<void> = async () => {}
   const rpcContract = AUTOCONTINUE_RPC_CONTRACT
 
   const rpcImplementation = {
@@ -62,7 +67,7 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
       }
       const entry = store.getState(input.sessionID)
       const state = entry?.state ?? (input.enabled ? "watching" : "stopped")
-      void emitStateChanged(input.sessionID, state, entry?.consecutive ?? 0)
+      void emitStateChanged(input.sessionID, state, entry?.consecutive ?? 0, entry?.heartbeats ?? 0)
       return { state }
     },
     async status(input: { sessionID: string }) {
@@ -76,9 +81,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   let rpcRegistration: Awaited<ReturnType<ServerContext["rpc"]["register"]>> | undefined
   try {
     rpcRegistration = await ctx.rpc.register(rpcContract, rpcImplementation)
-    emitStateChanged = async (sessionID, state, consecutive) => {
+    emitStateChanged = async (sessionID, state, consecutive, heartbeats) => {
       try {
-        await rpcRegistration?.events.emit("state.changed", { sessionID, state, consecutive })
+        await rpcRegistration?.events.emit("state.changed", { sessionID, state, consecutive, heartbeats })
       } catch {
         // TUI may be disconnected; footer catches up on next status check.
       }
@@ -87,8 +92,8 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
     console.error("[opencode-autocontinue] RPC registration failed (TUI status unavailable):", error)
   }
 
-  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, consecutive) => {
-    void emitStateChanged(sessionID, state, consecutive)
+  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, consecutive, heartbeats) => {
+    void emitStateChanged(sessionID, state, consecutive, heartbeats)
   })
   await engine.installRetryHook()
   // Sessions restored from storage (hydrate) should resume their keep-alive
