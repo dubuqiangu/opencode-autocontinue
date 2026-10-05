@@ -33,6 +33,13 @@ export interface PluginConfig {
   excludeTitleKeywords: string[]
   /** After a real user message, wait this long before auto-injecting. */
   userGraceMs: number
+  /** Keep-alive interval (ms). 0 = disabled. Every interval, watched sessions
+   *  get the intervalMessage injected while they are idle/watching (skipped
+   *  while the model is busy, when done/stopped, or while a recovery is in
+   *  flight). Does NOT increment consecutive (it is a heartbeat, not a retry). */
+  intervalMs: number
+  /** Keep-alive message sent every intervalMs. Independent from `message`. */
+  intervalMessage: string
 }
 
 export const DEFAULT_CONFIG: PluginConfig = {
@@ -61,6 +68,9 @@ export const DEFAULT_CONFIG: PluginConfig = {
   excludePatterns: ["MessageAbortedError", "operation was aborted"],
   excludeTitleKeywords: ["测试"],
   userGraceMs: 300_000,
+  intervalMs: 3_600_000,
+  intervalMessage:
+    "继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。",
 }
 
 /** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
@@ -156,6 +166,10 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
     )
   }
   if (typeof overrides.userGraceMs === "number") merged.userGraceMs = overrides.userGraceMs
+  if (typeof overrides.intervalMs === "number") merged.intervalMs = overrides.intervalMs
+  if (typeof overrides.intervalMessage === "string" && overrides.intervalMessage) {
+    merged.intervalMessage = overrides.intervalMessage
+  }
   return merged
 }
 

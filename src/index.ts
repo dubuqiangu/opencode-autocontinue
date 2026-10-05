@@ -51,8 +51,10 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
     async set(input: { sessionID: string; enabled: boolean }) {
       if (input.enabled) {
         await store.watch(input.sessionID, config().endTime ? computeEndAt(config().endTime, config().startTime) : 0)
+        engine.scheduleKeepAlive(input.sessionID)
       } else {
         await store.unwatch(input.sessionID)
+        engine.stopKeepAlive(input.sessionID)
       }
       const entry = store.getState(input.sessionID)
       const state = entry?.state ?? (input.enabled ? "watching" : "stopped")
@@ -85,6 +87,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
     void emitStateChanged(sessionID, state, consecutive)
   })
   await engine.installRetryHook()
+  // Sessions restored from storage (hydrate) should resume their keep-alive
+  // heartbeat without waiting for a new /autocontinue on.
+  engine.resumeKeepAlives()
 
   const controller = new AbortController()
   void (async () => {

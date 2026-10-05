@@ -420,3 +420,52 @@ test("concurrent tryInject calls only inject once (inFlight guard)", async () =>
   await Promise.all([first, second])
   assert.equal(session.prompts.length, 1)
 })
+
+// --- keep-alive heartbeat ---
+
+test("DEFAULT_CONFIG has 1h interval and a distinct intervalMessage", () => {
+  assert.equal(DEFAULT_CONFIG.intervalMs, 3_600_000)
+  assert.equal(DEFAULT_CONFIG.intervalMessage, "继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。")
+  assert.notEqual(DEFAULT_CONFIG.intervalMessage, DEFAULT_CONFIG.message)
+})
+
+test("mergeConfig overrides intervalMs and intervalMessage", () => {
+  const merged = mergeConfig(DEFAULT_CONFIG, { intervalMs: 60_000, intervalMessage: "心跳" })
+  assert.equal(merged.intervalMs, 60_000)
+  assert.equal(merged.intervalMessage, "心跳")
+})
+
+test("keep-alive injects intervalMessage without incrementing consecutive", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000, maxConsecutive: 3 })
+  await store.watch("ses_k1")
+  await engine.tryKeepAlive("ses_k1")
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /按既定计划推进/)
+  const entry = store.getState("ses_k1")
+  assert.equal(entry?.consecutive, 0) // heartbeat must not count toward maxConsecutive
+  assert.equal(entry?.state, "watching")
+})
+
+test("keep-alive skips while a recovery is in flight", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k2")
+  store.getMemory("ses_k2").inFlight = true
+  await engine.tryKeepAlive("ses_k2")
+  assert.equal(session.prompts.length, 0)
+})
+
+test("keep-alive skips when the model was active within 60s", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k3")
+  store.getMemory("ses_k3").lastBusyAt = Date.now() - 5_000
+  await engine.tryKeepAlive("ses_k3")
+  assert.equal(session.prompts.length, 0)
+})
+
+test("keep-alive stops for a session that is no longer watching", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k4")
+  await store.unwatch("ses_k4")
+  await engine.tryKeepAlive("ses_k4")
+  assert.equal(session.prompts.length, 0)
+})

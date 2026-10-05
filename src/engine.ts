@@ -96,6 +96,8 @@ export class AutocontinueEngine {
   private readonly store: WatchStore
   private readonly emitChanged: (sessionID: string, state: WatchState["state"], consecutive: number) => void
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Per-session keep-alive interval timers (heartbeat injections). */
+  private readonly intervalTimers = new Map<string, ReturnType<typeof setInterval>>()
   private disposed = false
   private titleCache = new Map<string, string>()
 
@@ -131,11 +133,80 @@ export class AutocontinueEngine {
     this.timers.set(sessionID, timer)
   }
 
-    private clearTimer(sessionID: string): void {
+  private clearTimer(sessionID: string): void {
     const timer = this.timers.get(sessionID)
     if (timer) {
       clearTimeout(timer)
       this.timers.delete(sessionID)
+    }
+  }
+
+  /** Start the per-session keep-alive interval timer. No-op when disabled. */
+  scheduleKeepAlive(sessionID: string): void {
+    const cfg = this.config()
+    if (this.disposed || !cfg.enabled || cfg.intervalMs <= 0) return
+    if (this.intervalTimers.has(sessionID)) return
+    const timer = setInterval(() => {
+      void this.tryKeepAlive(sessionID)
+    }, cfg.intervalMs)
+    this.intervalTimers.set(sessionID, timer)
+  }
+
+  /** Stop the per-session keep-alive interval timer. Idempotent. */
+  stopKeepAlive(sessionID: string): void {
+    const timer = this.intervalTimers.get(sessionID)
+    if (timer) {
+      clearInterval(timer)
+      this.intervalTimers.delete(sessionID)
+    }
+  }
+
+  /** Start keep-alives for every currently-watching session (post-hydrate). */
+  resumeKeepAlives(): void {
+    for (const status of this.store.list()) {
+      if (status.state === "watching") this.scheduleKeepAlive(status.sessionID)
+    }
+  }
+
+  /** Periodic heartbeat: inject intervalMessage into an idle watching session.
+   *  Skips while a recovery is in flight / pending, while the model has been
+   *  active recently, inside the user grace window, or when the latest
+   *  assistant message carries a completion marker (task truly done). Does not
+   *  increment consecutive — it is a heartbeat, not a retry. */
+  private async tryKeepAlive(sessionID: string): Promise<void> {
+    const cfg = this.config()
+    if (this.disposed || !cfg.enabled || cfg.intervalMs <= 0) return
+    const entry = this.store.getState(sessionID)
+    if (!entry || entry.state !== "watching") {
+      this.stopKeepAlive(sessionID)
+      return
+    }
+    const memory = this.store.getMemory(sessionID)
+    // A recovery injection is in flight — let it own the conversation.
+    if (memory.inFlight) return
+    // An error recovery is pending — the error path will handle it.
+    if (memory.pendingContinue) return
+    // Model active recently (busy/retry within the last 60s) — don't interrupt.
+    if (memory.lastBusyAt && Date.now() - memory.lastBusyAt < 60_000) return
+    // User just sent a real message — respect the grace window.
+    if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
+    // Task genuinely done — stop the heartbeat, don't inject.
+    const matcher = buildCompletionMatcher(cfg)
+    if (matcher) {
+      try {
+        const latestText = await this.latestAssistantText(sessionID)
+        if (hasCompletionMarker(latestText, matcher)) {
+          this.stopKeepAlive(sessionID)
+          return
+        }
+      } catch {
+        // Proceed on context-read failure (defensive).
+      }
+    }
+    try {
+      await injectContinuation(this.session, sessionID, cfg.intervalMessage, entry.endAt ?? 0)
+    } catch (error) {
+      console.error("[opencode-autocontinue] keep-alive injection failed:", error)
     }
   }
 
@@ -156,6 +227,7 @@ export class AutocontinueEngine {
       if (entry.endAt && Date.now() >= entry.endAt) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
+        this.stopKeepAlive(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
@@ -164,6 +236,7 @@ export class AutocontinueEngine {
       if (cfg.maxConsecutive > 0 && entry.consecutive >= cfg.maxConsecutive) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
+        this.stopKeepAlive(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
@@ -179,6 +252,7 @@ export class AutocontinueEngine {
       if (titleExcluded(title, cfg.excludeTitleKeywords)) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
+        this.stopKeepAlive(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
@@ -197,6 +271,7 @@ export class AutocontinueEngine {
         if (hasCompletionMarker(latestText, matcher)) {
           await this.store.markDone(sessionID)
           this.clearTimer(sessionID)
+          this.stopKeepAlive(sessionID)
           void this.emitChangedInternal(sessionID, "done")
           return
         }
@@ -300,6 +375,7 @@ export class AutocontinueEngine {
         if (role === "user") {
           memory.lastUserMessageAt = Date.now()
           await this.store.resume(sessionID)
+          this.scheduleKeepAlive(sessionID)
           void this.emitChangedInternal(sessionID, "watching")
           break
         }
@@ -317,6 +393,7 @@ export class AutocontinueEngine {
               if (hasCompletionMarker(text, matcher)) {
                 await this.store.markDone(sessionID)
                 this.clearTimer(sessionID)
+                this.stopKeepAlive(sessionID)
                 void this.emitChangedInternal(sessionID, "done")
               }
             }
@@ -327,6 +404,7 @@ export class AutocontinueEngine {
       case "session.deleted": {
         this.store.unwatch(sessionID).catch(() => {})
         this.clearTimer(sessionID)
+        this.stopKeepAlive(sessionID)
         break
       }
       default:
@@ -338,5 +416,7 @@ export class AutocontinueEngine {
     this.disposed = true
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
+    for (const timer of this.intervalTimers.values()) clearInterval(timer)
+    this.intervalTimers.clear()
   }
 }

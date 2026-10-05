@@ -41,13 +41,19 @@ type RpcClient = {
   status(input: { sessionID: string }): Promise<{ watched: boolean; state?: WatchStatusView }>
 }
 
-// "3m 22s" (≥1 min) or "45s". Clamps negative/NaN inputs to "0s".
+// "3m 22s" (≥1 min) or "45s"; "10h 13m" (≥1h); "2d 3h" (≥1d).
+// Clamps negative/NaN inputs to "0s".
 function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0s"
   const totalSeconds = Math.floor(ms / 1000)
-  const minutes = Math.floor(totalSeconds / 60)
+  const days = Math.floor(totalSeconds / 86_400)
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
   const seconds = totalSeconds % 60
-  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
 }
 
 export default Plugin.define({
