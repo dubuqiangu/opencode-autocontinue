@@ -51,10 +51,11 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
               sessionID: { type: "string" },
               state: { type: "string" },
               consecutive: { type: "number" },
+              heartbeats: { type: "number" },
               lastInjectedAt: { type: "number" },
               since: { type: "number" },
             },
-            required: ["sessionID", "state", "consecutive", "since"],
+            required: ["sessionID", "state", "consecutive", "heartbeats", "since"],
             additionalProperties: false,
           },
         },
@@ -92,6 +93,7 @@ export interface WatchState {
   sessionID: string
   since: number
   consecutive: number
+  heartbeats: number
   lastInjectedAt?: number
   /** End of the current watch window (epoch ms). 0 = no window. Set at watch/resume time. */
   endAt?: number
@@ -102,6 +104,7 @@ export interface WatchStatus {
   sessionID: string
   state: WatchState["state"]
   consecutive: number
+  heartbeats: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (for the sidebar timer). */
   since: number

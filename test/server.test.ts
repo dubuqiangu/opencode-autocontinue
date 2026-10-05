@@ -444,6 +444,25 @@ test("keep-alive injects intervalMessage without incrementing consecutive", asyn
   const entry = store.getState("ses_k1")
   assert.equal(entry?.consecutive, 0) // heartbeat must not count toward maxConsecutive
   assert.equal(entry?.state, "watching")
+  assert.equal(entry?.heartbeats, 1) // but it does count as a heartbeat
+})
+
+test("recordHeartbeat increments and heartbeats survives hydrate + status", async () => {
+  const { store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_hb1")
+  await store.recordHeartbeat("ses_hb1")
+  await store.recordHeartbeat("ses_hb1")
+  assert.equal(store.getState("ses_hb1")?.heartbeats, 2)
+  // Status output must carry heartbeats (RPC schema declares it).
+  assert.equal(store.status("ses_hb1").state?.heartbeats, 2)
+  assert.equal(store.list()[0]?.heartbeats, 2)
+  // Persist + rehydrate keeps the counter.
+  await store.watch("ses_hb2")
+  await store.recordHeartbeat("ses_hb2")
+  await store.unwatch("ses_hb2")
+  await store.watch("ses_hb2")
+  // A fresh watch resets the counter.
+  assert.equal(store.getState("ses_hb2")?.heartbeats, 0)
 })
 
 test("keep-alive skips while a recovery is in flight", async () => {

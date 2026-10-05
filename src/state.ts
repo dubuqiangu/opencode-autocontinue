@@ -43,6 +43,7 @@ export class WatchStore {
             sessionID,
             state: entry.state === "done" || entry.state === "stopped" ? entry.state : "watching",
             consecutive: typeof entry.consecutive === "number" ? entry.consecutive : 0,
+            heartbeats: typeof entry.heartbeats === "number" ? entry.heartbeats : 0,
             since: typeof entry.since === "number" ? entry.since : now,
             endAt: typeof entry.endAt === "number" ? entry.endAt : 0,
             ...(typeof entry.lastInjectedAt === "number" ? { lastInjectedAt: entry.lastInjectedAt } : {}),
@@ -96,7 +97,14 @@ export class WatchStore {
   /** Enable watching for a session. Resets counters. */
   async watch(sessionID: string, endAt = 0): Promise<WatchState> {
     const now = Date.now()
-    const entry: WatchState = { sessionID, since: now, consecutive: 0, state: "watching", endAt }
+    const entry: WatchState = {
+      sessionID,
+      since: now,
+      consecutive: 0,
+      heartbeats: 0,
+      state: "watching",
+      endAt,
+    }
     this.watched.set(sessionID, entry)
     this.inMemory.delete(sessionID)
     await this.persist()
@@ -116,6 +124,14 @@ export class WatchStore {
     if (!entry) return
     entry.consecutive += 1
     entry.lastInjectedAt = Date.now()
+    await this.persist()
+  }
+
+  /** Count one keep-alive heartbeat injection (sidebar "♥" line). */
+  async recordHeartbeat(sessionID: string): Promise<void> {
+    const entry = this.watched.get(sessionID)
+    if (!entry) return
+    entry.heartbeats += 1
     await this.persist()
   }
 
@@ -141,6 +157,7 @@ export class WatchStore {
     if (!entry) return
     entry.state = "watching"
     entry.consecutive = 0
+    entry.heartbeats = 0
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
     const memory = this.inMemory.get(sessionID)
@@ -174,6 +191,7 @@ export class WatchStore {
         sessionID: entry.sessionID,
         state: entry.state,
         consecutive: entry.consecutive,
+        heartbeats: entry.heartbeats,
         // Omit lastInjectedAt when never injected: the runtime schema
         // validator rejects undefined against {type:"number"}.
         ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
@@ -187,6 +205,7 @@ export class WatchStore {
       sessionID: entry.sessionID,
       state: entry.state,
       consecutive: entry.consecutive,
+      heartbeats: entry.heartbeats,
       ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
       since: entry.since,
     }))

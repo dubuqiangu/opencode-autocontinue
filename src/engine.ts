@@ -243,6 +243,10 @@ export class AutocontinueEngine {
       }
       if (this.disposed) return
       await injectContinuation(this.session, sessionID, cfg.intervalMessage, entry.endAt ?? 0)
+      // Count this heartbeat so the sidebar can show how many keep-alive
+      // messages were sent for this watch session.
+      await this.store.recordHeartbeat(sessionID)
+      void this.emitChangedInternal(sessionID, "watching")
     } catch (error) {
       console.error("[opencode-autocontinue] keep-alive injection failed:", error)
     } finally {

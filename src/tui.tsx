@@ -31,6 +31,7 @@ interface WatchStatusView {
   sessionID: string
   state: "watching" | "stopped" | "done"
   consecutive: number
+  heartbeats: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (drives the sidebar timer). */
   since?: number
@@ -221,6 +222,7 @@ export default Plugin.define({
           metricLines.push("⏱ ✓")
         }
         metricLines.push(`🔁 ${status.consecutive} resume${status.consecutive === 1 ? "" : "s"}`)
+        metricLines.push(`💓 ${status.heartbeats} keep-alive${status.heartbeats === 1 ? "" : "s"}`)
         metricLines.push(`🎯 ${status.state}`)
         return metricLines.join("\n")
       })
