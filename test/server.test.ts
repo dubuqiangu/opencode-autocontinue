@@ -55,6 +55,7 @@ import {
   errorToMatchString,
   messageText,
   hasCompletionMarker,
+  looksIncomplete,
   titleExcluded,
 } from "../src/events.ts"
 
@@ -267,6 +268,81 @@ test("completion marker in last assistant text marks done", async () => {
   assert.equal(session.prompts.length, 0)
   assert.equal(store.status("ses_4").state?.state, "done")
   assert.ok(events.includes("done"))
+})
+
+test("looksIncomplete detects questions, in-flight tools, and short acks", () => {
+  // A: ends with a question mark — the model is asking the user.
+  assert.equal(looksIncomplete("需要我继续吗？", []), true)
+  assert.equal(looksIncomplete("Need more details?", []), true)
+  // B: tool_use without a matching tool_result — tool execution in flight.
+  assert.equal(
+    looksIncomplete("正在调用工具", [{ type: "tool_use", tool: "shell" }]),
+    true,
+  )
+  assert.equal(
+    looksIncomplete("工具已返回", [
+      { type: "tool_use", tool: "shell" },
+      { type: "tool_result", content: "ok" },
+    ]),
+    false,
+  )
+  // C: short acknowledgement — waiting for the next instruction.
+  assert.equal(looksIncomplete("好的", []), true)
+  assert.equal(looksIncomplete("明白了", []), true)
+  assert.equal(looksIncomplete("好的，我正在继续分析代码结构并推进。", []), false)
+  // Plain progress text is not incomplete.
+  assert.equal(looksIncomplete("已完成第一阶段的代码审查，共发现 3 个问题。", []), false)
+})
+
+test("idle does not inject when the model is asking a question", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "你希望我继续深入哪部分？" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_a1")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_a1" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_a1").state?.state, "watching") // still watching, not done
+})
+
+test("idle does not inject while a tool call is in flight", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    {
+      info: { role: "assistant" },
+      parts: [
+        { type: "text", text: "正在执行脚本" },
+        { type: "tool_use", tool: "bash" },
+      ],
+    },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_a2")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_a2" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_a2").state?.state, "watching")
+})
+
+test("idle does not inject on a short acknowledgement", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "好的" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_a3")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_a3" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_a3").state?.state, "watching")
 })
 
 test("title exclusion stops watching", async () => {

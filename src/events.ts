@@ -78,6 +78,54 @@ export function hasCompletionMarker(text: string, matcher: RegExp | null): boole
   return matcher.test(text)
 }
 
+// Short acknowledgement phrases (C) that indicate the model is waiting for
+// instructions rather than having finished the task.
+const ACK_WORDS = new Set([
+  "好的",
+  "好",
+  "明白",
+  "明白了",
+  "了解",
+  "收到",
+  "知道了",
+  "ok",
+  "okay",
+  "好的，",
+  "没问题",
+  "可以",
+  "嗯",
+  "嗯嗯",
+])
+
+/** Whether the latest assistant turn looks like work still in progress rather
+ *  than a genuine task completion. Used right before an injection to avoid
+ *  interrupting the model when it is mid-task:
+ *   A. ends with a question mark — asking the user something, waiting on input
+ *   B. last message has a tool_use part without a matching tool_result — the
+ *      tool call is in flight (streaming part may not have resolved yet)
+ *   C. very short acknowledgement text ("好的", "OK") — waiting for the next
+ *      instruction, not finished with the task */
+export function looksIncomplete(text: string, parts: unknown): boolean {
+  const trimmed = text.trim()
+  // A: question at the end — the model is asking the user, not finished.
+  if (/[?？]\s*$/.test(trimmed)) return true
+  // C: short acknowledgement only.
+  if (trimmed.length <= 8 && ACK_WORDS.has(trimmed.toLowerCase())) return true
+  // B: tool_use present without a tool_result — tool execution is in flight.
+  if (Array.isArray(parts)) {
+    let hasToolUse = false
+    let hasToolResult = false
+    for (const part of parts) {
+      if (!part || typeof part !== "object") continue
+      const type = (part as { type?: string }).type
+      if (type === "tool_use" || type === "tool") hasToolUse = true
+      if (type === "tool_result" || type === "tool") hasToolResult = true
+    }
+    if (hasToolUse && !hasToolResult) return true
+  }
+  return false
+}
+
 /** Check whether a session title contains any excluded keyword. */
 export function titleExcluded(title: string | undefined, excludeKeywords: string[]): boolean {
   if (!title || excludeKeywords.length === 0) return false

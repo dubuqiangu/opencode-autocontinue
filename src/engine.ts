@@ -8,6 +8,7 @@ import { injectContinuation } from "./prompt.ts"
 import {
   hasCompletionMarker,
   isRetryableError,
+  looksIncomplete,
   messageText,
   sessionIDFromEvent,
   sessionIDFromMessageInfo,
@@ -230,16 +231,17 @@ export class AutocontinueEngine {
       if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
       // Task genuinely done — stop the heartbeat, don't inject.
       const matcher = buildCompletionMatcher(cfg)
-      if (matcher) {
-        try {
-          const latestText = await this.latestAssistantText(sessionID)
-          if (hasCompletionMarker(latestText, matcher)) {
-            this.stopKeepAlive(sessionID)
-            return
-          }
-        } catch {
-          // Proceed on context-read failure (defensive).
+      try {
+        const latest = await this.latestAssistantText(sessionID)
+        if (hasCompletionMarker(latest.text, matcher)) {
+          this.stopKeepAlive(sessionID)
+          return
         }
+        // Mid-task (asking a question, tool in flight, short ack) — skip this
+        // round without touching the timer; the next interval re-checks.
+        if (looksIncomplete(latest.text, latest.parts)) return
+      } catch {
+        // Proceed on context-read failure (defensive).
       }
       if (this.disposed) return
       await injectContinuation(this.session, sessionID, cfg.intervalMessage, entry.endAt ?? 0)
@@ -308,18 +310,21 @@ export class AutocontinueEngine {
         return
       }
 
-      // Check for completion marker in the latest assistant message before injecting.
+      // Check completion marker in the latest assistant message before injecting.
+      // A completion marker means the task is genuinely done — mark done and
+      // stop. looksIncomplete (asking a question / tool in flight / short ack)
+      // means work is still in progress — skip this round, the next idle or
+      // retry event will re-check.
       const matcher = buildCompletionMatcher(cfg)
-      if (matcher) {
-        const latestText = await this.latestAssistantText(sessionID)
-        if (hasCompletionMarker(latestText, matcher)) {
-          await this.store.markDone(sessionID)
-          this.clearTimer(sessionID)
-          this.stopKeepAlive(sessionID)
-          void this.emitChangedInternal(sessionID, "done")
-          return
-        }
+      const latest = await this.latestAssistantText(sessionID)
+      if (hasCompletionMarker(latest.text, matcher)) {
+        await this.store.markDone(sessionID)
+        this.clearTimer(sessionID)
+        this.stopKeepAlive(sessionID)
+        void this.emitChangedInternal(sessionID, "done")
+        return
       }
+      if (looksIncomplete(latest.text, latest.parts)) return
 
       // 注入前复查：上面 await 期间 session 可能已被 unwatch / markDone /
       // markStopped，或用户已发真实消息（P2-2）。逐项复核，避免注入打断用户输入。
@@ -338,7 +343,7 @@ export class AutocontinueEngine {
     }
   }
 
-    private async latestAssistantText(sessionID: string): Promise<string> {
+    private async latestAssistantText(sessionID: string): Promise<{ text: string; parts: unknown }> {
     try {
       const messages = (await this.session.context({ sessionID })) as Array<{
         info?: { role?: string }
@@ -347,13 +352,13 @@ export class AutocontinueEngine {
       for (let index = messages.length - 1; index >= 0; index--) {
         const message = messages[index]
         if (message.info?.role === "assistant") {
-          return messageText(message.parts)
+          return { text: messageText(message.parts), parts: message.parts }
         }
       }
     } catch {
       // Fall through to empty.
     }
-    return ""
+    return { text: "", parts: undefined }
   }
 
   private async resolveTitle(sessionID: string): Promise<string | undefined> {
@@ -450,8 +455,8 @@ export class AutocontinueEngine {
           if (Date.now() - lastCheck < 2_000) break
           this.lastCompletionCheckAt.set(sessionID, Date.now())
           try {
-            const text = await this.latestAssistantText(sessionID)
-            if (hasCompletionMarker(text, matcher)) {
+            const latest = await this.latestAssistantText(sessionID)
+            if (hasCompletionMarker(latest.text, matcher)) {
               await this.store.markDone(sessionID)
               this.clearTimer(sessionID)
               this.stopKeepAlive(sessionID)
