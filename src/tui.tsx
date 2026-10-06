@@ -29,9 +29,8 @@ const RPC_ID = "autocontinue"
 
 interface WatchStatusView {
   sessionID: string
-  state: "watching" | "stopped" | "done"
-  consecutive: number
-  heartbeats: number
+  state: "watching" | "confirming" | "stopped" | "done"
+  injections: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (drives the sidebar timer). */
   since?: number
@@ -116,7 +115,7 @@ export default Plugin.define({
       if (!rpc) throw new Error("autocontinue RPC unavailable")
       const result = await rpc.set({ sessionID, enabled })
       if (enabled) {
-        updateStatus(sessionID, { sessionID, state: "watching", consecutive: 0, heartbeats: 0 })
+        updateStatus(sessionID, { sessionID, state: "watching", injections: 0 })
         // Fetch the real WatchStatus (with since) so the sidebar timer starts
         // from the server-recorded start time, not the optimistic guess.
         void refreshStatus(sessionID)
@@ -160,7 +159,7 @@ export default Plugin.define({
         const status = statusOf(sessionID)
         if (status === undefined) return null
         if (status.state === "done") return "[AC ✓]"
-        if (status.state === "stopped") return `[AC ⏸ ${status.consecutive}]`
+        if (status.state === "stopped") return `[AC ⏸ ${status.injections}]`
         return "[AC ●]"
       })
       return (
@@ -221,8 +220,7 @@ export default Plugin.define({
         } else {
           metricLines.push("⏱ ✓")
         }
-        metricLines.push(`🔁 ${status.consecutive} resume${status.consecutive === 1 ? "" : "s"}`)
-        metricLines.push(`💓 ${status.heartbeats} keep-alive${status.heartbeats === 1 ? "" : "s"}`)
+        metricLines.push(`🔄 ${status.injections} injection${status.injections === 1 ? "" : "s"}`)
         metricLines.push(`🎯 ${status.state}`)
         return metricLines.join("\n")
       })
@@ -313,7 +311,7 @@ export default Plugin.define({
                             updateStatus(sessionID, result.state)
                             showToast(
                               "Autocontinue",
-                              `Watching · ${result.state.state} · ${result.state.consecutive} resume${result.state.consecutive === 1 ? "" : "s"}`,
+                              `Watching · ${result.state.state} · ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}`,
                               "info",
                             )
                           } else {
@@ -360,17 +358,16 @@ export default Plugin.define({
         const unsubscribe = events.on(`rpc.${RPC_ID}.state.changed`, (event: any) => {
           const sessionID = event?.data?.sessionID ?? event?.properties?.sessionID ?? event?.sessionID
           const state = event?.data?.state ?? event?.properties?.state
-          const consecutive = event?.data?.consecutive ?? event?.properties?.consecutive ?? 0
-          const heartbeats = event?.data?.heartbeats ?? event?.properties?.heartbeats ?? 0
+          const injections = event?.data?.injections ?? event?.properties?.injections ?? 0
           if (typeof sessionID !== "string") return
           if (state === "stopped") {
             // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
             // 用 RPC status 复查区分：unwatch 后 status.watched=false → 清空本地信号。
             void refreshStatus(sessionID)
-          } else if (state === "watching" || state === "done") {
+          } else if (state === "watching" || state === "confirming" || state === "done") {
             // Per-session store: events for any watched session update only
             // that session's entry — no cross-session overwrite.
-            updateStatus(sessionID, { sessionID, state, consecutive, heartbeats })
+            updateStatus(sessionID, { sessionID, state, injections })
           }
         })
         if (typeof unsubscribe === "function") stopEvents = unsubscribe

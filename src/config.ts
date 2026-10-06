@@ -15,16 +15,23 @@ export interface PluginConfig {
   startTime: string
   /** End time (local HH:MM). Past it, all watching stops. */
   endTime: string
-  /** Delay after the session goes idle before injecting. */
+  /** Delay after the session goes idle (or after a retryable error) before checking. */
   idleDelayMs: number
   /** Minimum gap between two injections in the same session. */
   minIntervalMs: number
-  /** Max consecutive auto-injections per session before giving up. */
+  /** Max total injections per watch round before giving up (0 = unlimited). */
   maxConsecutive: number
-  /** Last assistant message matching any marker stops the session's watching. */
+  /** Total watch timeout (ms) per round. 0 = no time limit. */
+  watchTimeoutMs: number
+  /** Last assistant message matching any marker triggers the final check flow. */
   completionMarkers: string[]
   /** Optional raw regex replacing completionMarkers. */
   markerRegex: string
+  /** After a completion marker, inject this message asking for a whole-project
+   *  review + doc sync, then watch for a final completion marker. */
+  finalCheckEnabled: boolean
+  /** Message injected when a completion marker first appears (final check round). */
+  finalCheckMessage: string
   /** Error substrings (case-insensitive) that make a failure auto-continue. */
   errorPatterns: string[]
   /** Error substrings that never auto-continue (user-initiated aborts etc). */
@@ -33,26 +40,27 @@ export interface PluginConfig {
   excludeTitleKeywords: string[]
   /** After a real user message, wait this long before auto-injecting. */
   userGraceMs: number
-  /** Keep-alive interval (ms). 0 = disabled. Every interval, watched sessions
-   *  get the intervalMessage injected while they are idle/watching (skipped
-   *  while the model is busy, when done/stopped, or while a recovery is in
-   *  flight). Does NOT increment consecutive (it is a heartbeat, not a retry). */
+  /** Periodic check interval (ms). 0 = disabled. Every interval, watching
+   *  sessions get the unified `message` injected while idle (skipped while the
+   *  model is busy, when done/stopped, or while a check is in flight). */
   intervalMs: number
-  /** Keep-alive message sent every intervalMs. Independent from `message`. */
-  intervalMessage: string
 }
 
 export const DEFAULT_CONFIG: PluginConfig = {
   enabled: true,
   message:
-    "继续执行。审视已完成的功能是否存在bug，未实现的功能是否有安排好的执行计划",
+    "继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。",
   startTime: "",
   endTime: "",
   idleDelayMs: 15_000,
   minIntervalMs: 30_000,
   maxConsecutive: 20,
+  watchTimeoutMs: 0,
   completionMarkers: ["[任务完成]", "[夜间任务完成]", "[task done]", "<promise>DONE</promise>"],
   markerRegex: "",
+  finalCheckEnabled: true,
+  finalCheckMessage:
+    "请整体检查一遍项目是否存在遗漏或 bug，并同步整理项目相关文档。检查完毕确认无误后，输出完成标记。",
   errorPatterns: [
     "bad_response_status_code",
     "bad request",
@@ -69,8 +77,6 @@ export const DEFAULT_CONFIG: PluginConfig = {
   excludeTitleKeywords: ["测试"],
   userGraceMs: 300_000,
   intervalMs: 3_600_000,
-  intervalMessage:
-    "继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。",
 }
 
 /** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
@@ -144,12 +150,17 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   if (typeof overrides.idleDelayMs === "number") merged.idleDelayMs = overrides.idleDelayMs
   if (typeof overrides.minIntervalMs === "number") merged.minIntervalMs = overrides.minIntervalMs
   if (typeof overrides.maxConsecutive === "number") merged.maxConsecutive = overrides.maxConsecutive
+  if (typeof overrides.watchTimeoutMs === "number") merged.watchTimeoutMs = Math.max(0, overrides.watchTimeoutMs)
   if (Array.isArray(overrides.completionMarkers)) {
     merged.completionMarkers = overrides.completionMarkers.filter(
       (marker): marker is string => typeof marker === "string",
     )
   }
   if (typeof overrides.markerRegex === "string") merged.markerRegex = overrides.markerRegex
+  if (typeof overrides.finalCheckEnabled === "boolean") merged.finalCheckEnabled = overrides.finalCheckEnabled
+  if (typeof overrides.finalCheckMessage === "string" && overrides.finalCheckMessage) {
+    merged.finalCheckMessage = overrides.finalCheckMessage
+  }
   if (Array.isArray(overrides.errorPatterns)) {
     merged.errorPatterns = overrides.errorPatterns.filter(
       (pattern): pattern is string => typeof pattern === "string",
@@ -167,9 +178,6 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   }
   if (typeof overrides.userGraceMs === "number") merged.userGraceMs = overrides.userGraceMs
   if (typeof overrides.intervalMs === "number") merged.intervalMs = Math.max(1_000, overrides.intervalMs)
-  if (typeof overrides.intervalMessage === "string" && overrides.intervalMessage) {
-    merged.intervalMessage = overrides.intervalMessage
-  }
   return merged
 }
 

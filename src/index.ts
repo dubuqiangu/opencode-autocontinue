@@ -44,22 +44,17 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   await store.hydrate()
 
   // RPC events let the TUI refresh its footer live.
-  let emitStateChanged: (
-    sessionID: string,
-    state: string,
-    consecutive: number,
-    heartbeats: number,
-  ) => Promise<void> = async () => {}
+  let emitStateChanged: (sessionID: string, state: string, injections: number) => Promise<void> = async () => {}
   const rpcContract = AUTOCONTINUE_RPC_CONTRACT
 
   const rpcImplementation = {
     async set(input: { sessionID: string; enabled: boolean }) {
       if (input.enabled) {
         await store.watch(input.sessionID, config().endTime ? computeEndAt(config().endTime, config().startTime) : 0)
-        engine.scheduleKeepAlive(input.sessionID)
+        engine.scheduleInterval(input.sessionID)
       } else {
         await store.unwatch(input.sessionID)
-        engine.stopKeepAlive(input.sessionID)
+        engine.stopInterval(input.sessionID)
         // P2-3: cancel any pending injection timeout so it cannot fire after
         // unwatch (then re-watch before it fires would inject spuriously).
         engine.clearTimer(input.sessionID)
@@ -67,7 +62,7 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
       }
       const entry = store.getState(input.sessionID)
       const state = entry?.state ?? (input.enabled ? "watching" : "stopped")
-      void emitStateChanged(input.sessionID, state, entry?.consecutive ?? 0, entry?.heartbeats ?? 0)
+      void emitStateChanged(input.sessionID, state, entry?.injections ?? 0)
       return { state }
     },
     async status(input: { sessionID: string }) {
@@ -81,9 +76,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   let rpcRegistration: Awaited<ReturnType<ServerContext["rpc"]["register"]>> | undefined
   try {
     rpcRegistration = await ctx.rpc.register(rpcContract, rpcImplementation)
-    emitStateChanged = async (sessionID, state, consecutive, heartbeats) => {
+    emitStateChanged = async (sessionID, state, injections) => {
       try {
-        await rpcRegistration?.events.emit("state.changed", { sessionID, state, consecutive, heartbeats })
+        await rpcRegistration?.events.emit("state.changed", { sessionID, state, injections })
       } catch {
         // TUI may be disconnected; footer catches up on next status check.
       }
@@ -92,8 +87,8 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
     console.error("[opencode-autocontinue] RPC registration failed (TUI status unavailable):", error)
   }
 
-  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, consecutive, heartbeats) => {
-    void emitStateChanged(sessionID, state, consecutive, heartbeats)
+  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, injections) => {
+    void emitStateChanged(sessionID, state, injections)
   })
   await engine.installRetryHook()
   // Sessions restored from storage (hydrate) should resume their keep-alive

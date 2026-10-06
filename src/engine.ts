@@ -1,5 +1,19 @@
 // Core decision engine for opencode-autocontinue.
-// Owns the retry hook and the error/idle -> inject pipeline.
+// Owns the retry hook and the unified error/idle/interval -> inject pipeline.
+//
+// Unified architecture (v0.3.0):
+// - A single decision point `maybeInject(sessionID)` is reached by every
+//   trigger source: a per-session interval timer, a session.idle event, or a
+//   retryable error. There is no separate "keep-alive" path anymore.
+// - A single counter `injections` counts every injection in the current round
+//   (retries + final checks + periodic). It drives the maxConsecutive cap and
+//   the sidebar display.
+// - Completion flow is two-phase: a completion marker while "watching" injects
+//   the finalCheckMessage and moves the state to "confirming"; a second
+//   completion marker while "confirming" marks the session "done". A fresh user
+//   message or a non-marker assistant turn returns "confirming" to "watching".
+// - `watchTimeoutMs` (0 = unlimited) stops the watch round after a wall-clock
+//   budget, independent of the daily endTime window.
 
 import type { PluginConfig } from "./config.ts"
 import { buildCompletionMatcher } from "./config.ts"
@@ -98,11 +112,10 @@ export class AutocontinueEngine {
   private readonly emitChanged: (
     sessionID: string,
     state: WatchState["state"],
-    consecutive: number,
-    heartbeats: number,
+    injections: number,
   ) => void
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
-  /** Per-session keep-alive interval timers (heartbeat injections). */
+  /** Per-session interval timers (periodic re-checks). */
   private readonly intervalTimers = new Map<string, ReturnType<typeof setInterval>>()
   private disposed = false
   private titleCache = new Map<string, string>()
@@ -113,12 +126,7 @@ export class AutocontinueEngine {
     session: SessionLike,
     config: () => PluginConfig,
     store: WatchStore,
-    emitChanged: (
-      sessionID: string,
-      state: WatchState["state"],
-      consecutive: number,
-      heartbeats: number,
-    ) => void,
+    emitChanged: (sessionID: string, state: WatchState["state"], injections: number) => void,
   ) {
     this.session = session
     this.config = config
@@ -141,7 +149,7 @@ export class AutocontinueEngine {
     if (existing) clearTimeout(existing)
     const timer = setTimeout(() => {
       this.timers.delete(sessionID)
-      void this.tryInject(sessionID)
+      void this.maybeInject(sessionID)
     }, delayMs)
     this.timers.set(sessionID, timer)
   }
@@ -164,19 +172,19 @@ export class AutocontinueEngine {
     this.lastCompletionCheckAt.delete(sessionID)
   }
 
-  /** Start the per-session keep-alive interval timer. No-op when disabled. */
-  scheduleKeepAlive(sessionID: string): void {
+  /** Start the per-session interval timer (periodic re-check). No-op when disabled. */
+  scheduleInterval(sessionID: string): void {
     const cfg = this.config()
     if (this.disposed || !cfg.enabled || cfg.intervalMs <= 0) return
     if (this.intervalTimers.has(sessionID)) return
     const timer = setInterval(() => {
-      void this.tryKeepAlive(sessionID)
+      void this.maybeInject(sessionID)
     }, cfg.intervalMs)
     this.intervalTimers.set(sessionID, timer)
   }
 
-  /** Stop the per-session keep-alive interval timer. Idempotent. */
-  stopKeepAlive(sessionID: string): void {
+  /** Stop the per-session interval timer. Idempotent. */
+  stopInterval(sessionID: string): void {
     const timer = this.intervalTimers.get(sessionID)
     if (timer) {
       clearInterval(timer)
@@ -184,115 +192,58 @@ export class AutocontinueEngine {
     }
   }
 
-  /** Start keep-alives for every currently-watching session (post-hydrate). */
+  /** Start intervals for every currently-watching session (post-hydrate). */
   resumeKeepAlives(): void {
     for (const status of this.store.list()) {
-      if (status.state === "watching") this.scheduleKeepAlive(status.sessionID)
+      if (status.state === "watching" || status.state === "confirming") {
+        this.scheduleInterval(status.sessionID)
+      }
     }
   }
 
-  /** Periodic heartbeat: inject intervalMessage into an idle watching session.
-   *  Skips while a recovery is in flight / pending, while the model has been
-   *  active recently, inside the user grace window, when the time window is
-   *  closed, or when the latest assistant message carries a completion marker
-   *  (task truly done). Does not increment consecutive — it is a heartbeat, not
-   *  a retry. */
-  private async tryKeepAlive(sessionID: string): Promise<void> {
-    const cfg = this.config()
-    if (this.disposed || !cfg.enabled || cfg.intervalMs <= 0) return
-    const entry = this.store.getState(sessionID)
-    if (!entry || entry.state !== "watching") {
-      this.stopKeepAlive(sessionID)
-      return
-    }
-    const memory = this.store.getMemory(sessionID)
-    // An error recovery is pending — the error path will handle it. But a stale
-    // latch (error long ago, no idle ever arrived) must not suppress the
-    // heartbeat forever: clear it after the retry-window grace.
-    if (memory.pendingContinue) {
-      const staleAt = memory.pendingContinueAt
-      if (staleAt && Date.now() - staleAt > Math.max(cfg.idleDelayMs, 30_000)) {
-        memory.pendingContinue = false
-        memory.pendingContinueAt = 0
-      } else {
-        return
-      }
-    }
-    // P1-1: mirror tryInject's time-window gate. A heartbeat must not inject
-    // outside the configured start/end window — that would break night-watch
-    // sessions whose state is still "watching" but whose endAt has passed.
-    if (startTimeNotReached(cfg.startTime)) return
-    if (entry.endAt && Date.now() >= entry.endAt) {
-      await this.store.markStopped(sessionID)
-      this.stopKeepAlive(sessionID)
-      void this.emitChangedInternal(sessionID, "stopped")
-      return
-    }
-    // P1-2: hold the same inFlight lock tryInject uses, across the async
-    // completion-marker check below. Otherwise two heartbeat ticks (or a
-    // heartbeat + a recovery injection) can both pass the lock check and inject
-    // back-to-back in the TOCTOU window of `await latestAssistantText`.
-    if (memory.inFlight) return
-    memory.inFlight = true
-    try {
-      // Model active recently (busy/retry within the last 60s) — don't interrupt.
-      if (memory.lastBusyAt && Date.now() - memory.lastBusyAt < 60_000) return
-      // User just sent a real message — respect the grace window.
-      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
-      // Task genuinely done — stop the heartbeat, don't inject.
-      const matcher = buildCompletionMatcher(cfg)
-      try {
-        const latest = await this.latestAssistantText(sessionID)
-        if (hasCompletionMarker(latest.text, matcher)) {
-          this.stopKeepAlive(sessionID)
-          return
-        }
-        // Mid-task (asking a question, tool in flight, short ack) — skip this
-        // round without touching the timer; the next interval re-checks.
-        if (looksIncomplete(latest.text, latest.parts)) return
-      } catch {
-        // Proceed on context-read failure (defensive).
-      }
-      if (this.disposed) return
-      await injectContinuation(this.session, sessionID, cfg.intervalMessage, entry.endAt ?? 0)
-      // Count this heartbeat so the sidebar can show how many keep-alive
-      // messages were sent for this watch session.
-      await this.store.recordHeartbeat(sessionID)
-      void this.emitChangedInternal(sessionID, "watching")
-    } catch (error) {
-      console.error("[opencode-autocontinue] keep-alive injection failed:", error)
-    } finally {
-      memory.inFlight = false
-    }
-  }
-
-  /** Core injection decision. Idempotent per session (single-flight via inFlight). */
-  private async tryInject(sessionID: string): Promise<void> {
+  /** Unified injection decision reached by every trigger source. Single-flight
+   *  per session (inFlight). The completion flow is two-phase (watching ->
+   *  confirming -> done) with an optional whole-project review + doc sync in
+   *  between. `injections` counts every injection and drives maxConsecutive. */
+  private async maybeInject(sessionID: string): Promise<void> {
     const cfg = this.config()
     const memory = this.store.getMemory(sessionID)
     if (this.disposed || !cfg.enabled) return
     if (memory.inFlight) return
-    // 入口即置位：后面有多个 await（标题、最新消息），并发 tryInject 才能被拦住。
+    // Set the lock at entry: later awaits (title, latest message) must not let
+    // concurrent triggers double-inject (TOCTOU window).
     memory.inFlight = true
     try {
       const entry = this.store.getState(sessionID)
-      if (!entry || entry.state !== "watching") return
+      if (!entry || (entry.state !== "watching" && entry.state !== "confirming")) {
+        this.stopInterval(sessionID)
+        return
+      }
 
       // Time window (endAt frozen at watch time).
       if (startTimeNotReached(cfg.startTime)) return
       if (entry.endAt && Date.now() >= entry.endAt) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
-        this.stopKeepAlive(sessionID)
+        this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
 
-      // Consecutive cap.
-      if (cfg.maxConsecutive > 0 && entry.consecutive >= cfg.maxConsecutive) {
+      // Wall-clock watch budget (watchTimeoutMs = 0 means no limit).
+      if (cfg.watchTimeoutMs > 0 && Date.now() - entry.since >= cfg.watchTimeoutMs) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
-        this.stopKeepAlive(sessionID)
+        this.stopInterval(sessionID)
+        void this.emitChangedInternal(sessionID, "stopped")
+        return
+      }
+
+      // Injection cap.
+      if (cfg.maxConsecutive > 0 && entry.injections >= cfg.maxConsecutive) {
+        await this.store.markStopped(sessionID)
+        this.clearTimer(sessionID)
+        this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
@@ -308,10 +259,13 @@ export class AutocontinueEngine {
       if (titleExcluded(title, cfg.excludeTitleKeywords)) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
-        this.stopKeepAlive(sessionID)
+        this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
+
+      // Model active recently (busy/retry within the last 60s) — don't interrupt.
+      if (memory.lastBusyAt && Date.now() - memory.lastBusyAt < 60_000) return
 
       // Min interval between injections.
       if (entry.lastInjectedAt && Date.now() - entry.lastInjectedAt < cfg.minIntervalMs) {
@@ -320,27 +274,46 @@ export class AutocontinueEngine {
         return
       }
 
-      // Check completion marker in the latest assistant message before injecting.
-      // A completion marker means the task is genuinely done — mark done and
-      // stop. looksIncomplete (asking a question / tool in flight / short ack)
-      // means work is still in progress — skip this round, the next idle or
-      // retry event will re-check.
+      // Inspect the latest assistant message to decide what to do.
       const matcher = buildCompletionMatcher(cfg)
       const latest = await this.latestAssistantText(sessionID)
-      if (hasCompletionMarker(latest.text, matcher)) {
+      const hasMarker = hasCompletionMarker(latest.text, matcher)
+
+      if (hasMarker && entry.state === "confirming") {
+        // Second marker while confirming: the review round is done — truly done.
         await this.store.markDone(sessionID)
         this.clearTimer(sessionID)
-        this.stopKeepAlive(sessionID)
+        this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "done")
         return
       }
+      if (hasMarker && cfg.finalCheckEnabled) {
+        // First marker while watching: run the whole-project review round.
+        await this.store.beginConfirming(sessionID)
+        this.clearTimer(sessionID)
+        void this.emitChangedInternal(sessionID, "confirming")
+        await injectContinuation(this.session, sessionID, cfg.finalCheckMessage, entry.endAt ?? 0)
+        await this.store.recordInjection(sessionID)
+        void this.emitChangedInternal(sessionID, "confirming")
+        return
+      }
+      if (hasMarker) {
+        // Marker but final check disabled: done immediately.
+        await this.store.markDone(sessionID)
+        this.clearTimer(sessionID)
+        this.stopInterval(sessionID)
+        void this.emitChangedInternal(sessionID, "done")
+        return
+      }
+      // Mid-task (asking a question, tool in flight, short ack) — skip this
+      // round; the next trigger re-checks.
       if (looksIncomplete(latest.text, latest.parts)) return
 
       // 注入前复查：上面 await 期间 session 可能已被 unwatch / markDone /
       // markStopped，或用户已发真实消息（P2-2）。逐项复核，避免注入打断用户输入。
       if (this.disposed) return
       const freshEntry = this.store.getState(sessionID)
-      if (!freshEntry || freshEntry.state !== "watching") return
+      if (!freshEntry || (freshEntry.state !== "watching" && freshEntry.state !== "confirming")) return
       if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
 
       await injectContinuation(this.session, sessionID, cfg.message, freshEntry.endAt ?? 0)
@@ -353,7 +326,7 @@ export class AutocontinueEngine {
     }
   }
 
-    private async latestAssistantText(sessionID: string): Promise<{ text: string; parts: unknown }> {
+  private async latestAssistantText(sessionID: string): Promise<{ text: string; parts: unknown }> {
     try {
       const messages = (await this.session.context({ sessionID })) as Array<{
         info?: { role?: string }
@@ -390,7 +363,7 @@ export class AutocontinueEngine {
 
   private async emitChangedInternal(sessionID: string, state: WatchState["state"]): Promise<void> {
     const entry = this.store.getState(sessionID)
-    this.emitChanged(sessionID, state, entry?.consecutive ?? 0, entry?.heartbeats ?? 0)
+    this.emitChanged(sessionID, state, entry?.injections ?? 0)
   }
 
   /** Handle a single server event. */
@@ -442,7 +415,7 @@ export class AutocontinueEngine {
         if (role === "user") {
           memory.lastUserMessageAt = Date.now()
           await this.store.resume(sessionID, true)
-          this.scheduleKeepAlive(sessionID)
+          this.scheduleInterval(sessionID)
           void this.emitChangedInternal(sessionID, "watching")
           break
         }
@@ -458,18 +431,32 @@ export class AutocontinueEngine {
           if (!matcher) break
           // P2-6: throttle the full-context completion check — streaming hosts
           // emit many message.updated events per message; pulling session
-          // context on each one would stall the event loop. The idle path's
-          // tryInject re-checks completion right before any real injection, so
+          // context on each one would stall the event loop. The unified
+          // maybeInject re-checks completion right before any real injection, so
           // a throttled check here only delays detection, never misses it.
           const lastCheck = this.lastCompletionCheckAt.get(sessionID) ?? 0
           if (Date.now() - lastCheck < 2_000) break
           this.lastCompletionCheckAt.set(sessionID, Date.now())
           try {
             const latest = await this.latestAssistantText(sessionID)
-            if (hasCompletionMarker(latest.text, matcher)) {
+            const hasMarker = hasCompletionMarker(latest.text, matcher)
+            const current = this.store.getState(sessionID)
+            if (hasMarker && current?.state === "confirming") {
               await this.store.markDone(sessionID)
               this.clearTimer(sessionID)
-              this.stopKeepAlive(sessionID)
+              this.stopInterval(sessionID)
+              void this.emitChangedInternal(sessionID, "done")
+            } else if (hasMarker && cfg.finalCheckEnabled) {
+              await this.store.beginConfirming(sessionID)
+              this.clearTimer(sessionID)
+              void this.emitChangedInternal(sessionID, "confirming")
+              await injectContinuation(this.session, sessionID, cfg.finalCheckMessage, current?.endAt ?? 0)
+              await this.store.recordInjection(sessionID)
+              void this.emitChangedInternal(sessionID, "confirming")
+            } else if (hasMarker) {
+              await this.store.markDone(sessionID)
+              this.clearTimer(sessionID)
+              this.stopInterval(sessionID)
               void this.emitChangedInternal(sessionID, "done")
             }
           } catch {
@@ -481,7 +468,7 @@ export class AutocontinueEngine {
       case "session.deleted": {
         this.store.unwatch(sessionID).catch(() => {})
         this.clearTimer(sessionID)
-        this.stopKeepAlive(sessionID)
+        this.stopInterval(sessionID)
         this.forgetSession(sessionID)
         break
       }

@@ -36,14 +36,19 @@ export class WatchStore {
         const now = Date.now()
         for (const [sessionID, entry] of Object.entries(saved)) {
           if (!entry || typeof entry.sessionID !== "string") continue
-          // Normalize legacy rows: old persisted data may lack since/consecutive
+          // Normalize legacy rows: old persisted data may lack since/injections
           // or carry null lastInjectedAt, which would fail the RPC schema
           // validator (status/list output must not contain undefined/null).
+          // Legacy `consecutive`+`heartbeats` are folded into a single `injections`.
+          const legacyConsecutive = (entry as { consecutive?: unknown }).consecutive
+          const legacyHeartbeats = (entry as { heartbeats?: unknown }).heartbeats
+          const legacyTotal =
+            (typeof legacyConsecutive === "number" ? legacyConsecutive : 0) +
+            (typeof legacyHeartbeats === "number" ? legacyHeartbeats : 0)
           this.watched.set(sessionID, {
             sessionID,
             state: entry.state === "done" || entry.state === "stopped" ? entry.state : "watching",
-            consecutive: typeof entry.consecutive === "number" ? entry.consecutive : 0,
-            heartbeats: typeof entry.heartbeats === "number" ? entry.heartbeats : 0,
+            injections: typeof entry.injections === "number" ? entry.injections : legacyTotal,
             since: typeof entry.since === "number" ? entry.since : now,
             endAt: typeof entry.endAt === "number" ? entry.endAt : 0,
             ...(typeof entry.lastInjectedAt === "number" ? { lastInjectedAt: entry.lastInjectedAt } : {}),
@@ -100,8 +105,7 @@ export class WatchStore {
     const entry: WatchState = {
       sessionID,
       since: now,
-      consecutive: 0,
-      heartbeats: 0,
+      injections: 0,
       state: "watching",
       endAt,
     }
@@ -118,24 +122,16 @@ export class WatchStore {
     await this.persist()
   }
 
-  /** Advance the consecutive counter and record injection time. */
+  /** Advance the injection counter and record injection time. */
   async recordInjection(sessionID: string): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
-    entry.consecutive += 1
+    entry.injections += 1
     entry.lastInjectedAt = Date.now()
     await this.persist()
   }
 
-  /** Count one keep-alive heartbeat injection (sidebar "♥" line). */
-  async recordHeartbeat(sessionID: string): Promise<void> {
-    const entry = this.watched.get(sessionID)
-    if (!entry) return
-    entry.heartbeats += 1
-    await this.persist()
-  }
-
-  /** Mark the session done (completion marker seen) but keep it watched so the user sees "done". */
+  /** Mark the session done (final completion marker seen) but keep it watched so the user sees "done". */
   async markDone(sessionID: string): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
@@ -143,11 +139,21 @@ export class WatchStore {
     await this.persist()
   }
 
-  /** Mark stopped (max consecutive / end time / explicit abort). */
+  /** Mark stopped (max injections / end time / watch timeout / explicit abort). */
   async markStopped(sessionID: string): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.state = "stopped"
+    await this.persist()
+  }
+
+  /** Move a session into the final-check phase after its first completion marker.
+   *  The watch round continues; a second marker (after the review injection)
+   *  will mark it done. */
+  async beginConfirming(sessionID: string): Promise<void> {
+    const entry = this.watched.get(sessionID)
+    if (!entry) return
+    entry.state = "confirming"
     await this.persist()
   }
 
@@ -156,8 +162,7 @@ export class WatchStore {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.state = "watching"
-    entry.consecutive = 0
-    entry.heartbeats = 0
+    entry.injections = 0
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
     const memory = this.inMemory.get(sessionID)
@@ -174,11 +179,11 @@ export class WatchStore {
     await this.persist()
   }
 
-  /** Reset consecutive counter (real user message / successful progress). */
-  async resetConsecutive(sessionID: string): Promise<void> {
+  /** Reset injection counter (real user message / successful progress). */
+  async resetInjectionCount(sessionID: string): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
-    entry.consecutive = 0
+    entry.injections = 0
     await this.persist()
   }
 
@@ -190,8 +195,7 @@ export class WatchStore {
       state: {
         sessionID: entry.sessionID,
         state: entry.state,
-        consecutive: entry.consecutive,
-        heartbeats: entry.heartbeats,
+        injections: entry.injections,
         // Omit lastInjectedAt when never injected: the runtime schema
         // validator rejects undefined against {type:"number"}.
         ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
@@ -204,8 +208,7 @@ export class WatchStore {
     return [...this.watched.values()].map((entry) => ({
       sessionID: entry.sessionID,
       state: entry.state,
-      consecutive: entry.consecutive,
-      heartbeats: entry.heartbeats,
+      injections: entry.injections,
       ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
       since: entry.since,
     }))

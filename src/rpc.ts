@@ -50,12 +50,11 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
             properties: {
               sessionID: { type: "string" },
               state: { type: "string" },
-              consecutive: { type: "number" },
-              heartbeats: { type: "number" },
+              injections: { type: "number" },
               lastInjectedAt: { type: "number" },
               since: { type: "number" },
             },
-            required: ["sessionID", "state", "consecutive", "heartbeats", "since"],
+            required: ["sessionID", "state", "injections", "since"],
             additionalProperties: false,
           },
         },
@@ -80,10 +79,9 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
         properties: {
           sessionID: { type: "string" },
           state: { type: "string" },
-          consecutive: { type: "number" },
-          heartbeats: { type: "number" },
+          injections: { type: "number" },
         },
-        required: ["sessionID", "state", "consecutive", "heartbeats"],
+        required: ["sessionID", "state", "injections"],
         additionalProperties: false,
       },
     },
@@ -93,19 +91,18 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
 export interface WatchState {
   sessionID: string
   since: number
-  consecutive: number
-  heartbeats: number
+  /** Total injections (retries + final checks + periodic) in the current round. */
+  injections: number
   lastInjectedAt?: number
   /** End of the current watch window (epoch ms). 0 = no window. Set at watch/resume time. */
   endAt?: number
-  state: "watching" | "stopped" | "done"
+  state: "watching" | "confirming" | "stopped" | "done"
 }
 
 export interface WatchStatus {
   sessionID: string
   state: WatchState["state"]
-  consecutive: number
-  heartbeats: number
+  injections: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (for the sidebar timer). */
   since: number
@@ -133,9 +130,9 @@ export interface RpcContract {
         properties: {
           sessionID: { type: "string" }
           state: { type: "string" }
-          consecutive: { type: "number" }
+          injections: { type: "number" }
         }
-        required: ["sessionID", "state", "consecutive"]
+        required: ["sessionID", "state", "injections"]
         additionalProperties: false
       }
     }

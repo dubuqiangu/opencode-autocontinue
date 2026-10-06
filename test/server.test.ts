@@ -149,10 +149,10 @@ async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
   const session = makeFakeSession()
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const events: Array<{ sessionID: string; state: string; consecutive: number; heartbeats: number }> = []
+  const events: Array<{ sessionID: string; state: string; injections: number }> = []
   const config = () => ({ ...DEFAULT_CONFIG, ...overrides })
-  const engine = new AutocontinueEngine(session as any, config, store, (sid, state, consecutive, heartbeats) => {
-    events.push({ sessionID: sid, state, consecutive, heartbeats })
+  const engine = new AutocontinueEngine(session as any, config, store, (sid, state, injections) => {
+    events.push({ sessionID: sid, state, injections })
   })
   return { session, store, engine, events }
 }
@@ -251,7 +251,7 @@ test("maxConsecutive cap stops watching", async () => {
   assert.ok(events.some((event) => event.state === "stopped"))
 })
 
-test("completion marker in last assistant text marks done", async () => {
+test("completion marker with final check enabled runs the review round, not done", async () => {
   const session = makeFakeSession()
   session.context = async () => [
     { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
@@ -265,9 +265,11 @@ test("completion marker in last assistant text marks done", async () => {
   await store.watch("ses_4")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_4" })
   await new Promise((resolve) => setTimeout(resolve, 60))
-  assert.equal(session.prompts.length, 0)
-  assert.equal(store.status("ses_4").state?.state, "done")
-  assert.ok(events.includes("done"))
+  // First marker triggers the final-check review injection and enters confirming.
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /整体检查/)
+  assert.equal(store.status("ses_4").state?.state, "confirming")
+  assert.ok(events.includes("confirming"))
 })
 
 test("looksIncomplete detects questions, in-flight tools, and short acks", () => {
@@ -472,10 +474,10 @@ test("retryHookHandler matches bare 5xx status via appended status", () => {
   assert.equal(event.decision.retry, true)
 })
 
-test("concurrent tryInject calls only inject once (inFlight guard)", async () => {
+test("concurrent maybeInject calls only inject once (inFlight guard)", async () => {
   const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
   await store.watch("ses_9")
-  // 门闩：第一次 context 调用挂起，制造两个 tryInject 交错的窗口。
+  // 门闩：第一次 context 调用挂起，制造两个 maybeInject 交错的窗口。
   let releaseContext: () => void = () => {}
   let contextCallCount = 0
   let gateFirstContext = true
@@ -489,145 +491,229 @@ test("concurrent tryInject calls only inject once (inFlight guard)", async () =>
     }
     return Promise.resolve([])
   }
-  const first = engine.tryInject("ses_9")
-  const second = engine.tryInject("ses_9")
+  const first = engine.maybeInject("ses_9")
+  const second = engine.maybeInject("ses_9")
   assert.equal(contextCallCount, 1) // 第二个撞上 inFlight 闩锁，不会进入 context
   releaseContext()
   await Promise.all([first, second])
   assert.equal(session.prompts.length, 1)
 })
 
-// --- keep-alive heartbeat ---
+// --- unified injection (periodic checks) ---
 
-test("DEFAULT_CONFIG has 1h interval and a distinct intervalMessage", () => {
+test("DEFAULT_CONFIG has 1h interval and a final check enabled by default", () => {
   assert.equal(DEFAULT_CONFIG.intervalMs, 3_600_000)
-  assert.equal(DEFAULT_CONFIG.intervalMessage, "继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。")
-  assert.notEqual(DEFAULT_CONFIG.intervalMessage, DEFAULT_CONFIG.message)
+  assert.equal(DEFAULT_CONFIG.finalCheckEnabled, true)
+  assert.match(DEFAULT_CONFIG.finalCheckMessage, /整体检查/)
+  assert.equal(DEFAULT_CONFIG.watchTimeoutMs, 0)
 })
 
-test("mergeConfig overrides intervalMs and intervalMessage", () => {
-  const merged = mergeConfig(DEFAULT_CONFIG, { intervalMs: 60_000, intervalMessage: "心跳" })
+test("mergeConfig overrides intervalMs and finalCheck settings", () => {
+  const merged = mergeConfig(DEFAULT_CONFIG, {
+    intervalMs: 60_000,
+    finalCheckEnabled: false,
+    finalCheckMessage: "复查",
+    watchTimeoutMs: 7_200_000,
+  })
   assert.equal(merged.intervalMs, 60_000)
-  assert.equal(merged.intervalMessage, "心跳")
+  assert.equal(merged.finalCheckEnabled, false)
+  assert.equal(merged.finalCheckMessage, "复查")
+  assert.equal(merged.watchTimeoutMs, 7_200_000)
 })
 
-test("keep-alive injects intervalMessage without incrementing consecutive", async () => {
+test("maybeInject injects the unified message and counts one injection", async () => {
   const { session, store, engine } = await makeEngine({ intervalMs: 60_000, maxConsecutive: 3 })
   await store.watch("ses_k1")
-  await engine.tryKeepAlive("ses_k1")
+  await engine.maybeInject("ses_k1")
   assert.equal(session.prompts.length, 1)
   assert.match(session.prompts[0] ?? "", /按既定计划推进/)
   const entry = store.getState("ses_k1")
-  assert.equal(entry?.consecutive, 0) // heartbeat must not count toward maxConsecutive
   assert.equal(entry?.state, "watching")
-  assert.equal(entry?.heartbeats, 1) // but it does count as a heartbeat
+  assert.equal(entry?.injections, 1)
 })
 
-test("recordHeartbeat increments and heartbeats survives hydrate + status", async () => {
-  const { store, engine } = await makeEngine({ intervalMs: 60_000 })
+test("injections survive hydrate + status + list", async () => {
+  const { store } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_hb1")
-  await store.recordHeartbeat("ses_hb1")
-  await store.recordHeartbeat("ses_hb1")
-  assert.equal(store.getState("ses_hb1")?.heartbeats, 2)
-  // Status output must carry heartbeats (RPC schema declares it).
-  assert.equal(store.status("ses_hb1").state?.heartbeats, 2)
-  assert.equal(store.list()[0]?.heartbeats, 2)
-  // Persist + rehydrate keeps the counter.
+  await store.recordInjection("ses_hb1")
+  await store.recordInjection("ses_hb1")
+  assert.equal(store.getState("ses_hb1")?.injections, 2)
+  assert.equal(store.status("ses_hb1").state?.injections, 2)
+  assert.equal(store.list()[0]?.injections, 2)
+  // A fresh watch resets the counter.
   await store.watch("ses_hb2")
-  await store.recordHeartbeat("ses_hb2")
+  await store.recordInjection("ses_hb2")
   await store.unwatch("ses_hb2")
   await store.watch("ses_hb2")
-  // A fresh watch resets the counter.
-  assert.equal(store.getState("ses_hb2")?.heartbeats, 0)
+  assert.equal(store.getState("ses_hb2")?.injections, 0)
 })
 
-test("keep-alive emitChanged carries the heartbeat count (regression)", async () => {
+test("maybeInject emitChanged carries the injection count (regression)", async () => {
   const { session, store, engine, events } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_hb3")
-  await engine.tryKeepAlive("ses_hb3")
+  await engine.maybeInject("ses_hb3")
   assert.equal(session.prompts.length, 1)
-  assert.equal(store.getState("ses_hb3")?.heartbeats, 1)
+  assert.equal(store.getState("ses_hb3")?.injections, 1)
   // The state.changed event (which the TUI uses to refresh the sidebar) must
-  // carry the fresh heartbeat count — otherwise the TUI would overwrite its
-  // local counter back to 0 on every keep-alive.
+  // carry the fresh injection count — otherwise the TUI would overwrite its
+  // local counter back to 0 on every periodic injection.
   const last = events[events.length - 1]
   assert.equal(last?.sessionID, "ses_hb3")
   assert.equal(last?.state, "watching")
-  assert.equal(last?.consecutive, 0) // heartbeat does not touch consecutive
-  assert.equal(last?.heartbeats, 1)
+  assert.equal(last?.injections, 1)
 })
 
-test("keep-alive skips while a recovery is in flight", async () => {
+test("maybeInject skips while a recovery is in flight", async () => {
   const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_k2")
   store.getMemory("ses_k2").inFlight = true
-  await engine.tryKeepAlive("ses_k2")
+  await engine.maybeInject("ses_k2")
   assert.equal(session.prompts.length, 0)
 })
 
-test("keep-alive skips when the model was active within 60s", async () => {
+test("maybeInject skips when the model was active within 60s", async () => {
   const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_k3")
   store.getMemory("ses_k3").lastBusyAt = Date.now() - 5_000
-  await engine.tryKeepAlive("ses_k3")
+  await engine.maybeInject("ses_k3")
   assert.equal(session.prompts.length, 0)
 })
 
-test("keep-alive stops for a session that is no longer watching", async () => {
+test("maybeInject stops for a session that is no longer watching", async () => {
   const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_k4")
   await store.unwatch("ses_k4")
-  await engine.tryKeepAlive("ses_k4")
+  await engine.maybeInject("ses_k4")
   assert.equal(session.prompts.length, 0)
 })
 
-// --- regression tests for review findings (P1/P2/P3 batch) ---
-
-test("keep-alive does not inject outside the time window (P1-1)", async () => {
-  // Watch with an endAt already in the past: the heartbeat must stop the
-  // session instead of injecting past the window.
+test("maybeInject does not inject outside the time window (P1-1)", async () => {
   const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_k5", Date.now() - 1_000)
-  await engine.tryKeepAlive("ses_k5")
+  await engine.maybeInject("ses_k5")
   assert.equal(session.prompts.length, 0)
   assert.equal(store.getState("ses_k5")?.state, "stopped")
 })
 
-test("keep-alive holds inFlight across the completion check (P1-2)", async () => {
-  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
-  await store.watch("ses_k6")
-  // Stale pendingContinue latch must NOT block the heartbeat after the
-  // retry-window grace, but a fresh one must.
-  store.getMemory("ses_k6").pendingContinue = true
-  store.getMemory("ses_k6").pendingContinueAt = Date.now() - 60_000
-  await engine.tryKeepAlive("ses_k6")
-  assert.equal(session.prompts.length, 1)
-})
-
-test("keep-alive respects a fresh pendingContinue latch (P2-8)", async () => {
-  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+test("fresh pendingContinue is consumed by the idle path (P2-8)", async () => {
+  // In the unified architecture the pendingContinue latch is consumed by the
+  // session.idle event handler (which schedules a delayed maybeInject); the
+  // interval-triggered maybeInject itself no longer reads it — the inFlight
+  // lock already prevents double injection.
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
   await store.watch("ses_k7")
   store.getMemory("ses_k7").pendingContinue = true
   store.getMemory("ses_k7").pendingContinueAt = Date.now()
-  await engine.tryKeepAlive("ses_k7")
-  assert.equal(session.prompts.length, 0)
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_k7" })
+  // The pendingContinue branch schedules with Math.max(idleDelayMs, 1000).
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
+  assert.equal(session.prompts.length, 1)
+  assert.equal(store.getMemory("ses_k7").pendingContinue, false) // consumed
 })
 
-test("hydrate normalizes legacy rows missing since/consecutive (P2-1)", async () => {
+test("completion marker with final check injects the review message then confirms", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
+    events.push(state)
+  })
+  await store.watch("ses_fc1")
+  await engine.maybeInject("ses_fc1")
+  // First marker: injects finalCheckMessage, moves to confirming, does NOT mark done.
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /整体检查/)
+  assert.equal(store.getState("ses_fc1")?.state, "confirming")
+  assert.equal(store.getState("ses_fc1")?.injections, 1)
+})
+
+test("second completion marker while confirming marks done", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
+    events.push(state)
+  })
+  await store.watch("ses_fc2")
+  await store.beginConfirming("ses_fc2")
+  await engine.maybeInject("ses_fc2")
+  // Second marker: done, no new injection.
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_fc2")?.state, "done")
+  assert.ok(events.includes("done"))
+})
+
+test("completion marker with final check disabled marks done immediately", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, finalCheckEnabled: false }),
+    store,
+    (_, state) => events.push(state),
+  )
+  await store.watch("ses_fc3")
+  await engine.maybeInject("ses_fc3")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_fc3")?.state, "done")
+  assert.ok(events.includes("done"))
+})
+
+test("watchTimeoutMs stops the round after the budget", async () => {
+  const { session, store, engine, events } = await makeEngine({ intervalMs: 60_000, watchTimeoutMs: 5_000 })
+  // Start the watch 10s ago so the budget is already exceeded.
+  const store2 = store
+  await store2.watch("ses_wt1")
+  const entry = store2.getState("ses_wt1")
+  if (entry) entry.since = Date.now() - 10_000
+  await engine.maybeInject("ses_wt1")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store2.getState("ses_wt1")?.state, "stopped")
+  assert.ok(events.some((event) => event.state === "stopped"))
+})
+
+test("hydrate normalizes legacy rows missing since/injections (P2-1)", async () => {
   const storage = new FakeStorage() as any
-  // Simulate old-version persisted data lacking since/consecutive and carrying
-  // a null lastInjectedAt (JSON round-trip of an explicit null).
+  // Simulate old-version persisted data lacking since/injections and carrying
+  // a null lastInjectedAt (JSON round-trip of an explicit null). Legacy
+  // consecutive+heartbeats must fold into injections.
   await storage.set("opencode-autocontinue.watched", {
-    ses_old: { sessionID: "ses_old", state: "watching", lastInjectedAt: null },
+    ses_old: { sessionID: "ses_old", state: "watching", consecutive: 2, heartbeats: 3, lastInjectedAt: null },
   })
   const store = new WatchStore(storage)
   await store.hydrate()
   const state = store.status("ses_old")
   assert.equal(state.watched, true)
   assert.equal(typeof state.state?.since, "number")
-  assert.equal(state.state?.consecutive, 0)
+  assert.equal(state.state?.injections, 5) // 2 consecutive + 3 heartbeats folded
   // lastInjectedAt must be omitted (null/undefined would fail the RPC schema).
   assert.equal(state.state?.lastInjectedAt, undefined)
+})
+
+// --- regression tests for review findings (P1/P2/P3 batch) ---
+
+test("maybeInject holds inFlight across the completion check (P1-2)", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k6")
+  // Stale pendingContinue latch must NOT block the injection after the
+  // retry-window grace, but a fresh one must.
+  store.getMemory("ses_k6").pendingContinue = true
+  store.getMemory("ses_k6").pendingContinueAt = Date.now() - 60_000
+  await engine.maybeInject("ses_k6")
+  assert.equal(session.prompts.length, 1)
 })
 
 test("resolveTitle does not cache an empty title (P2-4)", async () => {
