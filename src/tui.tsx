@@ -211,14 +211,12 @@ export default Plugin.define({
         const status = statusOf(props.sessionID)
         if (status === undefined) return null
         const metricLines: string[] = []
-        if (status.state === "watching") {
+        // 状态由 🎯 文字行表达（watching/confirming/stopped/done），⏱ 只负责
+        // 值守中的时长；stopped/done 不再重复符号（⏸/✓ 与 🎯 语义重复）。
+        if (status.state === "watching" || status.state === "confirming") {
           metricLines.push(
             typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ …",
           )
-        } else if (status.state === "stopped") {
-          metricLines.push("⏱ ⏸")
-        } else {
-          metricLines.push("⏱ ✓")
         }
         metricLines.push(`🔄 ${status.injections} injection${status.injections === 1 ? "" : "s"}`)
         metricLines.push(`🎯 ${status.state}`)
