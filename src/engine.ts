@@ -24,6 +24,7 @@ import {
   isRetryableError,
   looksIncomplete,
   messageText,
+  idleOutcomeFromEvent,
   sessionIDFromEvent,
   sessionIDFromMessageInfo,
   titleExcluded,
@@ -42,6 +43,7 @@ export interface EventLike {
   properties?: Record<string, unknown>
   data?: Record<string, unknown>
   info?: Record<string, unknown>
+  outcome?: unknown
 }
 
 /** Convert "HH:MM" to today's epoch ms. Empty endTime -> 0 (disabled).
@@ -397,6 +399,18 @@ export class AutocontinueEngine {
         break
       }
       case "session.idle": {
+        // User manually stopped the run (Esc) — opencode emits an idle event
+        // with outcome "interrupted" (the assistant message carries error
+        // {type:"aborted"}). Treat it as an explicit stop: mark stopped and do
+        // not schedule any further injection. Other idle outcomes
+        // (succeeded/failed) keep the existing continue-on-idle behavior.
+        if (idleOutcomeFromEvent(event) === "interrupted") {
+          await this.store.markStopped(sessionID)
+          this.clearTimer(sessionID)
+          this.stopInterval(sessionID)
+          void this.emitChangedInternal(sessionID, "stopped")
+          break
+        }
         if (memory.pendingContinue) {
           memory.pendingContinue = false
           this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 1_000))

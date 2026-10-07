@@ -10,6 +10,7 @@ export interface EventLike {
   info?: Record<string, unknown>
   status?: unknown
   error?: unknown
+  outcome?: unknown
 }
 
 /** Extract the sessionID from an event regardless of envelope shape. */
@@ -18,6 +19,18 @@ export function sessionIDFromEvent(event: EventLike): string | undefined {
   const nested = event.properties?.sessionID
   if (typeof nested === "string" && nested) return nested
   const dataNested = event.data?.sessionID
+  if (typeof dataNested === "string" && dataNested) return dataNested
+  return undefined
+}
+
+/** Extract the idle outcome from an event regardless of envelope shape. A
+ *  session.idle event with outcome "interrupted" means the user manually
+ *  stopped the run (Esc); succeeded/failed keep the continue-on-idle path. */
+export function idleOutcomeFromEvent(event: EventLike): string | undefined {
+  if (typeof event.outcome === "string" && event.outcome) return event.outcome
+  const nested = event.properties?.outcome
+  if (typeof nested === "string" && nested) return nested
+  const dataNested = event.data?.outcome
   if (typeof dataNested === "string" && dataNested) return dataNested
   return undefined
 }

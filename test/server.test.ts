@@ -50,6 +50,7 @@ test("mergeConfig merges only known keys with correct types", () => {
 
 // --- events ---
 import {
+  idleOutcomeFromEvent,
   sessionIDFromEvent,
   isRetryableError,
   errorToMatchString,
@@ -64,6 +65,14 @@ test("sessionIDFromEvent handles flat and nested shapes", () => {
   assert.equal(sessionIDFromEvent({ type: "x", properties: { sessionID: "ses_nested" } }), "ses_nested")
   assert.equal(sessionIDFromEvent({ type: "x", data: { sessionID: "ses_data" } }), "ses_data")
   assert.equal(sessionIDFromEvent({ type: "x" }), undefined)
+})
+
+test("idleOutcomeFromEvent handles flat and nested shapes", () => {
+  assert.equal(idleOutcomeFromEvent({ type: "session.idle", outcome: "interrupted" }), "interrupted")
+  assert.equal(idleOutcomeFromEvent({ type: "session.idle", properties: { outcome: "interrupted" } }), "interrupted")
+  assert.equal(idleOutcomeFromEvent({ type: "session.idle", data: { outcome: "interrupted" } }), "interrupted")
+  assert.equal(idleOutcomeFromEvent({ type: "session.idle" }), undefined)
+  assert.equal(idleOutcomeFromEvent({ type: "session.idle", outcome: 42 }), undefined)
 })
 
 test("errorToMatchString includes name and message", () => {
@@ -231,6 +240,35 @@ test("idle without error also resumes (stage-complete)", async () => {
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_2" })
   await new Promise((resolve) => setTimeout(resolve, 60))
   assert.equal(session.prompts.length, 1)
+})
+
+test("idle with outcome interrupted marks stopped and does not inject", async () => {
+  const { session, store, engine, events } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_int1")
+  await engine.handleEvent({
+    type: "session.idle",
+    sessionID: "ses_int1",
+    outcome: "interrupted",
+  })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(session.prompts.length, 0)
+  const status = store.status("ses_int1")
+  assert.equal(status.state?.state, "stopped")
+  assert.ok(events.some((event) => event.sessionID === "ses_int1" && event.state === "stopped"))
+})
+
+test("idle with outcome succeeded still schedules injection", async () => {
+  const { session, store, engine, events } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_ok1")
+  await engine.handleEvent({
+    type: "session.idle",
+    sessionID: "ses_ok1",
+    outcome: "succeeded",
+  })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 1)
+  assert.equal(store.status("ses_ok1").state?.state, "watching")
+  assert.equal(events.some((event) => event.sessionID === "ses_ok1" && event.state === "stopped"), false)
 })
 
 test("maxConsecutive cap stops watching", async () => {
