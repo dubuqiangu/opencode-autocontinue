@@ -73,6 +73,11 @@ export default Plugin.define({
         else next[sessionID] = status
         return next
       })
+      try {
+        context.renderer?.requestRender?.()
+      } catch {
+        // Request-render is best-effort; failure is silent.
+      }
     }
 
     // The authoritative current-session source is the footer/app slot's
@@ -163,8 +168,8 @@ export default Plugin.define({
         return "[AC ●]"
       })
       return (
-        <Show when={label() !== null}>
-          <text>{label()}</text>
+        <Show when={() => label() !== null}>
+          <text>{() => label()}</text>
         </Show>
       )
     }
@@ -196,7 +201,14 @@ export default Plugin.define({
         const status = statusOf(props.sessionID)
         const ticking = status?.state === "watching"
         if (ticking && sidebarTimer === undefined) {
-          sidebarTimer = setInterval(() => setNow(Date.now()), 1000)
+          sidebarTimer = setInterval(() => {
+            setNow(Date.now())
+            try {
+              context.renderer?.requestRender?.()
+            } catch {
+              // Request-render is best-effort; failure is silent.
+            }
+          }, 1000)
         } else if (!ticking && sidebarTimer !== undefined) {
           clearInterval(sidebarTimer)
           sidebarTimer = undefined
@@ -229,10 +241,10 @@ export default Plugin.define({
       // longer required). The memo keeps content updates reactive while shown.
       const muted = context.theme?.text?.muted
       return (
-        <Show when={content() !== null}>
+        <Show when={() => content() !== null}>
           <box flexDirection="column">
             <text fg={(context.theme as any)?.text?.base}>Watch</text>
-            <text fg={muted}>{content()}</text>
+            <text fg={muted}>{() => content()}</text>
           </box>
         </Show>
       )
