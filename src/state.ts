@@ -157,6 +157,16 @@ export class WatchStore {
     await this.persist()
   }
 
+  /** Return to watching after a review round that carried no completion marker.
+   *  Keeps the injection counter (same watch round) — unlike resume(), which
+   *  resets counters for a fresh user turn. */
+  async continueWatching(sessionID: string): Promise<void> {
+    const entry = this.watched.get(sessionID)
+    if (!entry) return
+    entry.state = "watching"
+    await this.persist()
+  }
+
   /** Return to watching (e.g. user re-enables, or a fresh real user message). */
   async resume(sessionID: string, recomputeEndAt = false): Promise<void> {
     const entry = this.watched.get(sessionID)

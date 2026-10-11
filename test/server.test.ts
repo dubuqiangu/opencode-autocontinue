@@ -784,3 +784,94 @@ test("default errorPatterns match 5xx via (status: 5) not bare 5 (P3-4)", () => 
   // A 5xx status still matches through the "(status: 5" prefix.
   assert.equal(isRetryableError({ name: "AI_Error", status: 503 }, DEFAULT_CONFIG.errorPatterns, []), true)
 })
+
+test("confirming does not mark done while the old marker message is still latest (B1)", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
+    store,
+    (_sid, state) => {
+      events.push(state)
+    },
+  )
+  await store.watch("ses_b1")
+  // First idle: first marker enters confirming and injects the review message.
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_b1" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(store.status("ses_b1").state?.state, "confirming")
+  const promptsAfterFirst = session.prompts.length
+  // Second idle with the SAME latest assistant message (no review reply yet):
+  // must NOT mark done and must NOT inject again.
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_b1" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(store.status("ses_b1").state?.state, "confirming")
+  assert.equal(session.prompts.length, promptsAfterFirst)
+  assert.ok(!events.includes("done"))
+})
+
+test("confirming review reply without marker returns to watching (B2)", async () => {
+  const messages: Array<{ info: { role: string }; parts: Array<{ type: string; text?: string }> }> = [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const session = makeFakeSession()
+  session.context = async () => messages
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
+    store,
+    (_sid, state) => {
+      events.push(state)
+    },
+  )
+  await store.watch("ses_b2")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_b2" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(store.status("ses_b2").state?.state, "confirming")
+  const injectionsWhileConfirming = store.status("ses_b2").state?.injections
+  // Model replies with a NEW assistant message carrying no completion marker.
+  messages.push({ info: { role: "assistant" }, parts: [{ type: "text", text: "整体检查完毕，发现还有 3 个问题需要继续处理。" }] })
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_b2" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(store.status("ses_b2").state?.state, "watching")
+  assert.equal(store.status("ses_b2").state?.injections, injectionsWhileConfirming)
+  assert.ok(events.includes("watching"))
+})
+
+test("confirming second marker in a NEW assistant message marks done (B1 positive)", async () => {
+  const messages: Array<{ info: { role: string }; parts: Array<{ type: string; text?: string }> }> = [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const session = makeFakeSession()
+  session.context = async () => messages
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
+    store,
+    (_sid, state) => {
+      events.push(state)
+    },
+  )
+  await store.watch("ses_b3")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_b3" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(store.status("ses_b3").state?.state, "confirming")
+  // Model replies affirming the overall check is complete.
+  messages.push({ info: { role: "assistant" }, parts: [{ type: "text", text: "复查完毕，[任务完成]。" }] })
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_b3" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(store.status("ses_b3").state?.state, "done")
+  assert.ok(events.includes("done"))
+})

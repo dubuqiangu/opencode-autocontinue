@@ -123,6 +123,10 @@ export class AutocontinueEngine {
   private titleCache = new Map<string, string>()
   /** Per-session last completion-check time (P2-6 throttle). */
   private lastCompletionCheckAt = new Map<string, number>()
+  /** Assistant-message count when the session entered confirming. A second
+   *  completion marker only counts in a message produced AFTER this point —
+   *  the old marker message must not re-trigger done (B1 guard). */
+  private confirmingAtAssistantCount = new Map<string, number>()
 
   constructor(
     session: SessionLike,
@@ -172,6 +176,7 @@ export class AutocontinueEngine {
   forgetSession(sessionID: string): void {
     this.titleCache.delete(sessionID)
     this.lastCompletionCheckAt.delete(sessionID)
+    this.confirmingAtAssistantCount.delete(sessionID)
   }
 
   /** Start the per-session interval timer (periodic re-check). No-op when disabled. */
@@ -281,16 +286,38 @@ export class AutocontinueEngine {
       const latest = await this.latestAssistantText(sessionID)
       const hasMarker = hasCompletionMarker(latest.text, matcher)
 
-      if (hasMarker && entry.state === "confirming") {
-        // Second marker while confirming: the review round is done — truly done.
-        await this.store.markDone(sessionID)
-        this.clearTimer(sessionID)
-        this.stopInterval(sessionID)
-        void this.emitChangedInternal(sessionID, "done")
+      // While confirming (whole-project review round in flight), a second
+      // completion marker only counts if it appears in a NEW assistant message
+      // produced after the finalCheckMessage injection. Until the model
+      // replies, the old marker message is still the latest — counting it
+      // again would mark the session done without ever running the review (B1).
+      const confirming = entry.state === "confirming"
+      const reviewing =
+        confirming &&
+        latest.assistantCount > (this.confirmingAtAssistantCount.get(sessionID) ?? 0)
+
+      if (confirming) {
+        if (!reviewing) return // model hasn't replied to the review prompt yet
+        if (hasMarker) {
+          // Second marker in the review's own reply: genuinely done.
+          await this.store.markDone(sessionID)
+          this.clearTimer(sessionID)
+          this.stopInterval(sessionID)
+          void this.emitChangedInternal(sessionID, "done")
+          return
+        }
+        // Review reply carries no marker: work is not claimed complete.
+        // Return to watching (keep the injection counter) and let the next
+        // trigger continue the round (B2 — non-marker assistant turn).
+        if (looksIncomplete(latest.text, latest.parts)) return
+        await this.store.continueWatching(sessionID)
+        this.confirmingAtAssistantCount.delete(sessionID)
+        void this.emitChangedInternal(sessionID, "watching")
         return
       }
       if (hasMarker && cfg.finalCheckEnabled) {
         // First marker while watching: run the whole-project review round.
+        this.confirmingAtAssistantCount.set(sessionID, latest.assistantCount)
         await this.store.beginConfirming(sessionID)
         this.clearTimer(sessionID)
         void this.emitChangedInternal(sessionID, "confirming")
@@ -328,22 +355,31 @@ export class AutocontinueEngine {
     }
   }
 
-  private async latestAssistantText(sessionID: string): Promise<{ text: string; parts: unknown }> {
+  private async latestAssistantText(sessionID: string): Promise<{
+    text: string
+    parts: unknown
+    assistantCount: number
+  }> {
     try {
       const messages = (await this.session.context({ sessionID })) as Array<{
         info?: { role?: string }
         parts?: unknown
       }>
-      for (let index = messages.length - 1; index >= 0; index--) {
-        const message = messages[index]
+      let assistantCount = 0
+      let latestText = ""
+      let latestParts: unknown = undefined
+      for (const message of messages) {
         if (message.info?.role === "assistant") {
-          return { text: messageText(message.parts), parts: message.parts }
+          assistantCount += 1
+          latestText = messageText(message.parts)
+          latestParts = message.parts
         }
       }
+      return { text: latestText, parts: latestParts, assistantCount }
     } catch {
       // Fall through to empty.
     }
-    return { text: "", parts: undefined }
+    return { text: "", parts: undefined, assistantCount: 0 }
   }
 
   private async resolveTitle(sessionID: string): Promise<string | undefined> {
@@ -429,6 +465,7 @@ export class AutocontinueEngine {
         if (role === "user") {
           memory.lastUserMessageAt = Date.now()
           await this.store.resume(sessionID, true)
+          this.confirmingAtAssistantCount.delete(sessionID)
           this.scheduleInterval(sessionID)
           void this.emitChangedInternal(sessionID, "watching")
           break
@@ -451,16 +488,33 @@ export class AutocontinueEngine {
           const lastCheck = this.lastCompletionCheckAt.get(sessionID) ?? 0
           if (Date.now() - lastCheck < 2_000) break
           this.lastCompletionCheckAt.set(sessionID, Date.now())
+          // Skip while the engine is mid-decision: maybeInject re-checks
+          // completion right before any injection, so this is only an early
+          // signal, never authoritative (prevents double finalCheck injection).
+          if (memory.inFlight) break
           try {
             const latest = await this.latestAssistantText(sessionID)
             const hasMarker = hasCompletionMarker(latest.text, matcher)
             const current = this.store.getState(sessionID)
-            if (hasMarker && current?.state === "confirming") {
-              await this.store.markDone(sessionID)
-              this.clearTimer(sessionID)
-              this.stopInterval(sessionID)
-              void this.emitChangedInternal(sessionID, "done")
+            if (current?.state === "confirming") {
+              // Same B1/B2 guards as maybeInject: a second marker only counts
+              // in a NEW assistant message; a non-marker review reply returns
+              // to watching instead of injecting the generic message.
+              const reviewing =
+                latest.assistantCount > (this.confirmingAtAssistantCount.get(sessionID) ?? 0)
+              if (!reviewing) break
+              if (hasMarker) {
+                await this.store.markDone(sessionID)
+                this.clearTimer(sessionID)
+                this.stopInterval(sessionID)
+                void this.emitChangedInternal(sessionID, "done")
+              } else if (!looksIncomplete(latest.text, latest.parts)) {
+                await this.store.continueWatching(sessionID)
+                this.confirmingAtAssistantCount.delete(sessionID)
+                void this.emitChangedInternal(sessionID, "watching")
+              }
             } else if (hasMarker && cfg.finalCheckEnabled) {
+              this.confirmingAtAssistantCount.set(sessionID, latest.assistantCount)
               await this.store.beginConfirming(sessionID)
               this.clearTimer(sessionID)
               void this.emitChangedInternal(sessionID, "confirming")
@@ -499,5 +553,6 @@ export class AutocontinueEngine {
     this.intervalTimers.clear()
     this.titleCache.clear()
     this.lastCompletionCheckAt.clear()
+    this.confirmingAtAssistantCount.clear()
   }
 }

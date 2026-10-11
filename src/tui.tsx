@@ -195,11 +195,12 @@ export default Plugin.define({
         }
       })
 
-      // Tick the elapsed watch timer only while this session is actively
-      // being watched; stops as soon as it leaves `watching`.
+      // Tick the elapsed watch timer while this session is actively being
+      // watched OR confirming (the review round is still part of the watch
+      // round); stops as soon as it leaves both.
       createEffect(() => {
         const status = statusOf(props.sessionID)
-        const ticking = status?.state === "watching"
+        const ticking = status?.state === "watching" || status?.state === "confirming"
         if (ticking && sidebarTimer === undefined) {
           sidebarTimer = setInterval(() => {
             setNow(Date.now())
@@ -376,8 +377,12 @@ export default Plugin.define({
             void refreshStatus(sessionID)
           } else if (state === "watching" || state === "confirming" || state === "done") {
             // Per-session store: events for any watched session update only
-            // that session's entry — no cross-session overwrite.
-            updateStatus(sessionID, { sessionID, state, injections })
+            // that session's entry — no cross-session overwrite. Merge with
+            // the existing entry so `since` (watch start) and lastInjectedAt
+            // survive — the RPC event only carries sessionID/state/injections,
+            // and dropping `since` would freeze the sidebar ⏱ to "⏱ …" (H1).
+            const current = statusOf(sessionID)
+            updateStatus(sessionID, { ...(current ?? {}), sessionID, state, injections })
           }
         })
         if (typeof unsubscribe === "function") stopEvents = unsubscribe
