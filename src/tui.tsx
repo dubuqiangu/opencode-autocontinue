@@ -22,8 +22,12 @@
 //     setup() call throws "Keymap.Provider is missing" on the host)
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js/dist/solid.js"
 import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
+// 0.3.5: slot mounts that create their render effects inside the plugin's own
+// module graph (see reactive-mount.ts — pitfall #13 verdict, mirrors
+// opencode-usage-meter v0.7.22).
+import { createReactiveSlotMount } from "./reactive-mount.ts"
 
 const RPC_ID = "autocontinue"
 
@@ -251,11 +255,19 @@ export default Plugin.define({
       )
     }
 
+    // 0.3.5: per-slot reactive mounts. The slot render returns a core box whose
+    // function children were inserted by OUR @opentui/solid copy, so the render
+    // effects (and every memo they read) live in the plugin's own module graph
+    // instead of the host's frozen snapshot (pitfall #13, same as
+    // opencode-usage-meter v0.7.22). Footer is a horizontal context — no layout
+    // props (verticalLayout=false).
+    const footerMount = createReactiveSlotMount(false)
+
     let stopSlot: (() => void) | undefined
     try {
       const slotResult = context.ui.slot({
         append: "prompt.footer.status",
-        render: FooterIndicator,
+        render: (slotProps: any) => footerMount.swap(() => <FooterIndicator slotProps={slotProps} />),
       })
       if (typeof slotResult?.dispose === "function") stopSlot = slotResult.dispose
       else if (typeof slotResult === "function") stopSlot = slotResult as () => void
@@ -265,15 +277,19 @@ export default Plugin.define({
 
     // Right-sidebar status block (mirrors opencode-usage-meter's
     // sidebar-metrics slot). SidebarStatus returns null when the session is
-    // not watched, so the block occupies no space while idle.
+    // not watched, so the block occupies no space while idle. The sidebar
+    // render is wrapped in a plugin-graph reactive mount (verticalLayout=true:
+    // width="100%" column box) so the block updates live without a host
+    // re-mount (pitfall #13).
+    const sidebarMount = createReactiveSlotMount(true)
     let stopSidebarSlot: (() => void) | undefined
     try {
       const sidebarResult = context.ui.slot({
         append: "sidebar.content",
         render: (sidebarProps: any) =>
-          sidebarProps?.sessionID ? (
-            <SidebarStatus sessionID={sidebarProps.sessionID} />
-          ) : null,
+          sidebarProps?.sessionID
+            ? sidebarMount.swap(() => <SidebarStatus sessionID={sidebarProps.sessionID} />)
+            : null,
       })
       if (typeof sidebarResult?.dispose === "function") stopSidebarSlot = sidebarResult.dispose
       else if (typeof sidebarResult === "function") stopSidebarSlot = sidebarResult as () => void
@@ -416,6 +432,10 @@ export default Plugin.define({
       stopAppSlot?.()
       layerDispose?.()
       stopFocusRefresh?.()
+      // 0.3.5: dispose any live slot mount's reactive graph (idempotent when
+      // the host already remounted past it).
+      footerMount?.release?.()
+      sidebarMount?.release?.()
     }
 
     onCleanup(disposeAll)
