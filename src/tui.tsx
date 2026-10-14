@@ -22,7 +22,7 @@
 //     setup() call throws "Keymap.Provider is missing" on the host)
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createMemo, createSignal, onCleanup } from "solid-js/dist/solid.js"
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
 // Session-ID resolution chain (JSX props-wrapper unwrap → slot cache →
 // router), extracted as a pure module so the v0.3.6 "No current session"
@@ -247,21 +247,42 @@ export default Plugin.define({
       // v0.3.8: NO <Show when={fn}> — Solid's Show never calls a function
       // `when` (it's truthy by identity), so the block rendered unconditionally
       // and the "Watch" title was always visible (the actual symptom-2 root
-      // cause, oracle-verified against solid-js/dist/solid.js Show source).
-      // The container box stays mounted (zero height while gated — invisible in
-      // the sidebar) and the inner tracked function child gates on content():
-      // insertExpression wraps each thunk in a render effect, so null removes
-      // the subtree and non-null inserts it — on appears immediately, off
-      // vanishes immediately, no host re-mount. Same pattern as usage-meter
-      // v0.7.22 sidebar-metrics.tsx collapsed toggle.
+      // cause, oracle-verified against solid-js Show source).
+      // v0.3.9: the container box stays mounted (zero height while gated —
+      // invisible in the sidebar) and the inner tracked function child gates on
+      // content(): insertExpression wraps each thunk in a render effect, so
+      // null removes the subtree and non-null inserts it — on appears
+      // immediately, off vanishes immediately, no host re-mount. The title row
+      // is collapsible like usage-meter's Stats header: a click flips a local
+      // collapsed signal and requests an immediate repaint. All dynamic reads
+      // are function children ({() => ...}) — JSX interpolations are evaluated
+      // once in the untracked component body and would freeze.
+      const [isCollapsed, setIsCollapsed] = createSignal(false)
       const muted = context.theme?.text?.muted
       return (
         <box flexDirection="column">
           {() =>
             content() !== null ? (
               <box flexDirection="column">
-                <text fg={(context.theme as any)?.text?.base}>Watch</text>
-                <text fg={muted}>{() => content()}</text>
+                <box
+                  flexDirection="row"
+                  width="100%"
+                  onMouseUp={() => {
+                    setIsCollapsed((prev) => !prev)
+                    try {
+                      context.renderer?.requestRender?.()
+                    } catch {
+                      // Repaint is best-effort; failure is silent.
+                    }
+                  }}
+                >
+                  <text fg={(context.theme as any)?.text?.base} selectable={false}>
+                    {() => `${isCollapsed() ? "▸" : "▼"} Watch`}
+                  </text>
+                </box>
+                {() =>
+                  isCollapsed() ? null : <text fg={muted}>{() => content()}</text>
+                }
               </box>
             ) : null
           }
@@ -269,12 +290,12 @@ export default Plugin.define({
       )
     }
 
-    // 0.3.5: per-slot reactive mounts. The slot render returns a core box whose
-    // function children were inserted by OUR @opentui/solid copy, so the render
-    // effects (and every memo they read) live in the plugin's own module graph
-    // instead of the host's frozen snapshot (pitfall #13, same as
-    // opencode-usage-meter v0.7.22). Footer is a horizontal context — no layout
-    // props (verticalLayout=false).
+    // Per-slot reactive mounts (reactive-mount.ts). v0.3.9 follows the
+    // OMO-Slim reactiveElement pattern: createElement + insert at the
+    // slot-render ambient position, no createRoot — so render effects land in
+    // the same solid graph the host slot machinery runs in (bare "solid-js"
+    // specifier resolves to the host instance; no shadow copies). Footer is a
+    // horizontal context — no layout props (verticalLayout=false).
     const footerMount = createReactiveSlotMount(false)
 
     let stopSlot: (() => void) | undefined
@@ -293,9 +314,9 @@ export default Plugin.define({
     // sidebar-metrics slot). The container box stays mounted while idle —
     // its tracked function-child gate renders an empty (zero-height) box so
     // the block occupies no visible space until watching starts. The sidebar
-    // render is wrapped in a plugin-graph reactive mount (verticalLayout=true:
+    // render is wrapped in a reactive mount (verticalLayout=true:
     // width="100%" column box) so the block updates live without a host
-    // re-mount (pitfall #13).
+    // re-mount (pitfall #13, OMO-Slim pattern since v0.3.9).
     const sidebarMount = createReactiveSlotMount(true)
     let stopSidebarSlot: (() => void) | undefined
     try {

@@ -1,15 +1,19 @@
 {
   "name": "opencode-autocontinue",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "OpenCode V2 plugin: auto-resume sessions interrupted before the overall task is done (model errors like bad_response_status_code, stage-complete idle, network blips). Per-session manual opt-in via /autocontinue, TUI footer status, retry hook, configurable message/time-window/limits.",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./tui": "./src/tui.tsx"
+    "./tui": "./dist/tui.js"
+  },
+  "scripts": {
+    "build:tui": "npx esbuild src/tui.tsx --bundle --format=esm --platform=node --target=es2022 --jsx=automatic --external:@opencode/* --external:@opentui/* --external:solid-js --external:solid-js/* --outfile=dist/tui.js"
   },
   "files": [
     "src",
+    "dist",
     "docs",
     "test",
     "README.md",
@@ -30,10 +34,5 @@
   },
   "dependencies": {
     "@opencode/plugin": "latest"
-  },
-  "peerDependencies": {
-    "@opentui/core": ">=0.5.8",
-    "@opentui/solid": ">=0.5.8",
-    "solid-js": ">=1.9.0"
   }
 }
