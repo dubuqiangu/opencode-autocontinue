@@ -3,7 +3,7 @@
 #
 # Chain: local HEAD pushed -> plugin update (with cache-bust fallback) ->
 #        plugin list commit match -> on-disk installed version match ->
-#        installed file tree mirrors the repo (src/test/docs counts) ->
+#        installed file tree mirrors the repo (src/test/docs/dist counts) ->
 #        host opencode.json registration.
 # Prints a PASS/FAIL line per check; exits 0 only when every check passes.
 #
@@ -87,6 +87,7 @@ Assert-Check "local HEAD is pushed (HEAD == origin/$defaultBranch)" ($localHead 
 $expectedSrcCount = Count-TrackedFiles $repoRoot "src"
 $expectedTestCount = Count-TrackedFiles $repoRoot "test"
 $expectedDocsCount = Count-TrackedFiles $repoRoot "docs"
+$expectedDistCount = Count-TrackedFiles $repoRoot "dist"
 
 # --- one-click update (returns early — poll for the install below) -----------------
 Set-Location $env:USERPROFILE
@@ -138,9 +139,11 @@ Assert-Check "on-disk installed version matches package.json" ($installedVersion
 $installedSrcCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "src") } else { -1 }
 $installedTestCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "test") } else { -1 }
 $installedDocsCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "docs") } else { -1 }
+$installedDistCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "dist") } else { -1 }
 Assert-Check "installed src tree mirrors the repo" ($installedSrcCount -eq $expectedSrcCount) "installed=$installedSrcCount repo=$expectedSrcCount"
 Assert-Check "installed test tree mirrors the repo" ($installedTestCount -eq $expectedTestCount) "installed=$installedTestCount repo=$expectedTestCount"
 Assert-Check "installed docs tree mirrors the repo" ($installedDocsCount -eq $expectedDocsCount) "installed=$installedDocsCount repo=$expectedDocsCount"
+Assert-Check "installed dist tree mirrors the repo" ($installedDistCount -eq $expectedDistCount) "installed=$installedDistCount repo=$expectedDistCount"
 
 # --- host registration ---------------------------------------------------------------
 $hostConfigPath = Join-Path $env:USERPROFILE ".config\opencode\opencode.json"
