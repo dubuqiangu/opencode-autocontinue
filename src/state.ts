@@ -36,6 +36,13 @@ export class WatchStore {
         const now = Date.now()
         for (const [sessionID, entry] of Object.entries(saved)) {
           if (!entry || typeof entry.sessionID !== "string") continue
+          // Terminal rows (done/stopped) are round-end feedback for the
+          // session that just ran — not a watch to resume. Restoring them
+          // across restarts made every previously watched session report
+          // watched=true forever, which kept the sidebar "Watch" block on
+          // screen by default. Drop them on hydrate; the next persist()
+          // rewrites storage without them.
+          if (entry.state === "done" || entry.state === "stopped") continue
           // Normalize legacy rows: old persisted data may lack since/injections
           // or carry null lastInjectedAt, which would fail the RPC schema
           // validator (status/list output must not contain undefined/null).

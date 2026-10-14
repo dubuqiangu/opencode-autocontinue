@@ -741,6 +741,40 @@ test("hydrate normalizes legacy rows missing since/injections (P2-1)", async () 
   assert.equal(state.state?.lastInjectedAt, undefined)
 })
 
+test("hydrate drops persisted terminal rows and keeps active watches", async () => {
+  const storage = new FakeStorage() as any
+  // done/stopped rows are round-end feedback for the run that just ended —
+  // restoring them made every previously watched session report watched=true
+  // forever (the sidebar "Watch" block shown by default). Only active rows
+  // (watching/confirming) may survive a restart.
+  await storage.set("opencode-autocontinue.watched", {
+    ses_finished: { sessionID: "ses_finished", state: "done", injections: 2, since: 1000, endAt: 0 },
+    ses_halted: { sessionID: "ses_halted", state: "stopped", injections: 1, since: 1000, endAt: 0 },
+    ses_midwatch: { sessionID: "ses_midwatch", state: "watching", injections: 0, since: 1000, endAt: 0 },
+  })
+  const store = new WatchStore(storage)
+  await store.hydrate()
+  assert.equal(store.status("ses_finished").watched, false)
+  assert.equal(store.status("ses_halted").watched, false)
+  assert.equal(store.status("ses_midwatch").watched, true)
+  assert.equal(store.status("ses_midwatch").state?.state, "watching")
+})
+
+test("hydrate-dropped terminal rows are not re-persisted by a later save", async () => {
+  const storage = new FakeStorage() as any
+  await storage.set("opencode-autocontinue.watched", {
+    ses_finished: { sessionID: "ses_finished", state: "done", injections: 2, since: 1000, endAt: 0 },
+  })
+  const store = new WatchStore(storage)
+  await store.hydrate()
+  // Any later persist() (here: a fresh watch) must rewrite storage from the
+  // in-memory map — the dropped terminal row must not come back.
+  await store.watch("ses_newwatch")
+  const snapshot = (await storage.get("opencode-autocontinue.watched")) as Record<string, unknown>
+  assert.equal("ses_finished" in snapshot, false)
+  assert.equal("ses_newwatch" in snapshot, true)
+})
+
 // --- regression tests for review findings (P1/P2/P3 batch) ---
 
 test("maybeInject holds inFlight across the completion check (P1-2)", async () => {

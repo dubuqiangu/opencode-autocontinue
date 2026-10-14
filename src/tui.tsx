@@ -160,7 +160,14 @@ export default Plugin.define({
     // APPEAR the moment the status flips to defined — a mount-time null return
     // would unmount the subtree and never re-render (Solid component bodies run
     // once per mount). The memo keeps label updates reactive.
-    const FooterIndicator = (slotProps?: any) => {
+    const FooterIndicator = (componentProps: { slotProps?: any }) => {
+      // JSX function components receive a props wrapper, not the raw slot
+      // props: <FooterIndicator slotProps={X}/> invokes us as FooterIndicator(
+      // {slotProps: X}). Reading .sessionID off that wrapper left it undefined,
+      // so lastSlotSessionID never cached and /autocontinue fell through to
+      // the unreliable router ("No current session"). Unwrap first — same
+      // shape as usage-meter's FooterStatus.
+      const slotProps = componentProps.slotProps
       const sessionID = currentSessionIDFrom(slotProps)
       if (sessionID) lastSlotSessionID = sessionID
       if (!sessionID) return null
@@ -227,6 +234,12 @@ export default Plugin.define({
       const content = createMemo(() => {
         const status = statusOf(props.sessionID)
         if (status === undefined) return null
+        // The sidebar block exists only while a watch round is ACTIVE
+        // (watching/confirming). Terminal rows (done/stopped) are round-end
+        // feedback and are carried by the footer indicator and the command
+        // toast — rendering them here kept a permanent "Watch" block on
+        // screen for every previously watched session.
+        if (status.state !== "watching" && status.state !== "confirming") return null
         const metricLines: string[] = []
         // 状态由 🎯 文字行表达（watching/confirming/stopped/done），⏱ 只负责
         // 值守中的时长；stopped/done 不再重复符号（⏸/✓ 与 🎯 语义重复）。
