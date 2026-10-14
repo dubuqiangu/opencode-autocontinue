@@ -24,6 +24,10 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js/dist/solid.js"
 import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
+// Session-ID resolution chain (JSX props-wrapper unwrap → slot cache →
+// router), extracted as a pure module so the v0.3.6 "No current session"
+// regression is unit-locked.
+import { resolveSessionID } from "./session-resolution.ts"
 // 0.3.5: slot mounts that create their render effects inside the plugin's own
 // module graph (see reactive-mount.ts — pitfall #13 verdict, mirrors
 // opencode-usage-meter v0.7.22).
@@ -134,17 +138,13 @@ export default Plugin.define({
       return result.state
     }
 
-    function currentSessionIDFrom(slotProps?: any): string | undefined {
+    function currentSessionIDFrom(componentProps?: { slotProps?: any }): string | undefined {
+      // Chain lives in session-resolution.ts (unit-locked): unwrap the JSX
+      // props wrapper → slot-cached sessionID → router params. The router
+      // may not reflect the focused session during slash-command execution,
+      // so it stays the last resort.
       const routerSessionID = (context.ui as any)?.router?.current?.()?.params?.sessionID
-      return (
-        slotProps?.sessionID ??
-        // Prefer the slot-cached sessionID over the router: the footer/sidebar
-        // slots always receive the authoritative sessionID, while the router
-        // may not reflect the focused session during slash-command execution.
-        lastSlotSessionID ??
-        (typeof routerSessionID === "string" && routerSessionID ? routerSessionID : undefined) ??
-        undefined
-      )
+      return resolveSessionID({ componentProps, cachedSessionID: lastSlotSessionID, routerSessionID })
     }
 
     const showToast = (title: string, message: string, variant?: string) => {
@@ -161,14 +161,9 @@ export default Plugin.define({
     // would unmount the subtree and never re-render (Solid component bodies run
     // once per mount). The memo keeps label updates reactive.
     const FooterIndicator = (componentProps: { slotProps?: any }) => {
-      // JSX function components receive a props wrapper, not the raw slot
-      // props: <FooterIndicator slotProps={X}/> invokes us as FooterIndicator(
-      // {slotProps: X}). Reading .sessionID off that wrapper left it undefined,
-      // so lastSlotSessionID never cached and /autocontinue fell through to
-      // the unreliable router ("No current session"). Unwrap first — same
-      // shape as usage-meter's FooterStatus.
-      const slotProps = componentProps.slotProps
-      const sessionID = currentSessionIDFrom(slotProps)
+      // componentProps is the JSX props wrapper ({slotProps: X}); the unwrap
+      // lives in session-resolution.ts so the shape is unit-locked.
+      const sessionID = currentSessionIDFrom(componentProps)
       if (sessionID) lastSlotSessionID = sessionID
       if (!sessionID) return null
       const label = createMemo(() => {

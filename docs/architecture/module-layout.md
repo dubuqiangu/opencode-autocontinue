@@ -12,6 +12,7 @@ src/
   events.ts   事件解析：sessionID 双兼容 / error 提取 / 完成标记正则
   engine.ts   核心判定：retry hook、错误/空闲调度、节流、时段、排除
   prompt.ts   续跑消息模板渲染 + session.prompt 注入
+  session-resolution.ts  TUI 会话 ID 解析链：JSX props 解包 → slot 缓存 → router（纯函数）
 ```
 
 ## 模块职责
@@ -20,6 +21,7 @@ src/
 |---|---|---|
 | `index.ts` | 组装：注册 RPC + hook + 事件订阅 + 清理 | rpc / engine / state |
 | `tui.tsx` | 命令入口 + footer 展示 + toast | rpc（跨进程走 HTTP client） |
+| `session-resolution.ts` | TUI 会话 ID 解析链（纯函数，可单测） | — |
 | `rpc.ts` | `set{enabled}` / `status{perSession}` / `list` + `state.changed` | state |
 | `config.ts` | 配置加载/合并/归一 | — |
 | `state.ts` | watched map 持久化 + 内存锁 | storage / config |

@@ -18,6 +18,10 @@ TUI 的 slash 命令若在 `setup()` 直接注册 keymap 会抛 `Keymap.Provider
 
 retry hook 的 `bad_response_status_code` 分类依赖 opencode 对错误类型的判定；retry 决策仅影响"该次模型调用"，最终失败仍走会话级续跑兜底——两层是互补而非替代。
 
+## JSX 函数组件的 props 包装层：「No current session」
+
+`<FooterIndicator slotProps={X}/>` 调用组件时传的是 props 包装对象 `{slotProps: X}`，不是裸 slot props。v0.3.6 前实现直接在包装层读 `.sessionID`——恒 undefined，`lastSlotSessionID` 从不缓存，`/autocontinue` 命令执行时三级回退（slotProps → 缓存 → router）全空，报「No current session」。修复：先解包再读（对齐 usage-meter `FooterStatus` 实证形状）；v0.3.7 将解析链抽成纯模块 `session-resolution.ts` 并加 4 把单测锁（包装错位坑 + 回退次序）。教训：JSX 组件函数的参数是 props 对象，透传 slot props 必须先解包，且解包形状要进单测。
+
 ## 经验沉淀
 
 - 静默 try/catch 会吞掉注册类失败的可见性——注册动作要么成功要么显式日志
