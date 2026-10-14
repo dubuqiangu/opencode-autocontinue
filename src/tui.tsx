@@ -22,7 +22,7 @@
 //     setup() call throws "Keymap.Provider is missing" on the host)
 //   - toast / dialog access guarded via optional chaining
 import { Plugin } from "@opencode/plugin/tui"
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js/dist/solid.js"
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js/dist/solid.js"
 import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
 // Session-ID resolution chain (JSX props-wrapper unwrap → slot cache →
 // router), extracted as a pure module so the v0.3.6 "No current session"
@@ -155,11 +155,11 @@ export default Plugin.define({
       }
     }
 
-    // Footer status indicator. The `<Show when={...}>` wrapper keeps the
-    // component mounted even while the session is unwatched, so the label can
-    // APPEAR the moment the status flips to defined — a mount-time null return
-    // would unmount the subtree and never re-render (Solid component bodies run
-    // once per mount). The memo keeps label updates reactive.
+    // Footer status indicator. The label memo returns null while the session
+    // is unwatched; the tracked function child ({() => label()}) is wrapped in
+    // a render effect by insertExpression, so the text patches in place the
+    // moment the status flips — no <Show> gate, no host re-mount required
+    // (same pattern as usage-meter's footer-status.tsx).
     const FooterIndicator = (componentProps: { slotProps?: any }) => {
       // componentProps is the JSX props wrapper ({slotProps: X}); the unwrap
       // lives in session-resolution.ts so the shape is unit-locked.
@@ -173,19 +173,15 @@ export default Plugin.define({
         if (status.state === "stopped") return `[AC ⏸ ${status.injections}]`
         return "[AC ●]"
       })
-      return (
-        <Show when={() => label() !== null}>
-          <text>{() => label()}</text>
-        </Show>
-      )
+      return <text>{() => label()}</text>
     }
 
     // Right-sidebar status block, mirroring opencode-usage-meter's
     // sidebar-metrics slot. Renders from the shared per-session status store
     // through a memo (live timer + reactive updates), and hydrates the store
     // from the server on mount (throttled: the host may re-mount the sidebar
-    // often). Returns null while the session is not watched so it takes no
-    // space in the sidebar.
+    // often). Always returns a container box; its tracked function-child gate
+    // renders zero height while unwatched so it takes no visible space.
     const SidebarStatus = (props: { sessionID: string }) => {
       const [now, setNow] = createSignal(Date.now())
       let sidebarTimer: ReturnType<typeof setInterval> | undefined
@@ -248,18 +244,28 @@ export default Plugin.define({
         return metricLines.join("\n")
       })
 
-      // P2-9: wrap in <Show when={...}> instead of a mount-time null return —
-      // the wrapper keeps this component mounted while unwatched so the block
-      // can APPEAR the moment the status flips to defined (host re-mount is no
-      // longer required). The memo keeps content updates reactive while shown.
+      // v0.3.8: NO <Show when={fn}> — Solid's Show never calls a function
+      // `when` (it's truthy by identity), so the block rendered unconditionally
+      // and the "Watch" title was always visible (the actual symptom-2 root
+      // cause, oracle-verified against solid-js/dist/solid.js Show source).
+      // The container box stays mounted (zero height while gated — invisible in
+      // the sidebar) and the inner tracked function child gates on content():
+      // insertExpression wraps each thunk in a render effect, so null removes
+      // the subtree and non-null inserts it — on appears immediately, off
+      // vanishes immediately, no host re-mount. Same pattern as usage-meter
+      // v0.7.22 sidebar-metrics.tsx collapsed toggle.
       const muted = context.theme?.text?.muted
       return (
-        <Show when={() => content() !== null}>
-          <box flexDirection="column">
-            <text fg={(context.theme as any)?.text?.base}>Watch</text>
-            <text fg={muted}>{() => content()}</text>
-          </box>
-        </Show>
+        <box flexDirection="column">
+          {() =>
+            content() !== null ? (
+              <box flexDirection="column">
+                <text fg={(context.theme as any)?.text?.base}>Watch</text>
+                <text fg={muted}>{() => content()}</text>
+              </box>
+            ) : null
+          }
+        </box>
       )
     }
 
@@ -284,8 +290,9 @@ export default Plugin.define({
     }
 
     // Right-sidebar status block (mirrors opencode-usage-meter's
-    // sidebar-metrics slot). SidebarStatus returns null when the session is
-    // not watched, so the block occupies no space while idle. The sidebar
+    // sidebar-metrics slot). The container box stays mounted while idle —
+    // its tracked function-child gate renders an empty (zero-height) box so
+    // the block occupies no visible space until watching starts. The sidebar
     // render is wrapped in a plugin-graph reactive mount (verticalLayout=true:
     // width="100%" column box) so the block updates live without a host
     // re-mount (pitfall #13).
