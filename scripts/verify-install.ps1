@@ -4,7 +4,8 @@
 # Chain: local HEAD pushed -> plugin update (with cache-bust fallback) ->
 #        plugin list commit match -> on-disk installed version match ->
 #        installed file tree mirrors the repo (src/test/docs/dist counts) ->
-#        host opencode.json registration.
+#        host opencode.json registration -> headless server behavior
+#        (test/install-verify.ts drives setup() with a mock context).
 # Prints a PASS/FAIL line per check; exits 0 only when every check passes.
 #
 # Known host quirk: `opencode plugin update` can report "No plugin updates
@@ -151,6 +152,13 @@ $hostConfig = if (Test-Path $hostConfigPath) {
   Get-Content $hostConfigPath -Raw -Encoding UTF8
 } else { "" }
 Assert-Check "plugin registered in opencode.json" ($hostConfig.Contains($PluginId))
+
+# --- headless server behavior check ------------------------------------------------
+# test/install-verify.ts loads src/index.ts exactly as the server would and drives
+# setup() with a mock context (RPC on/off, retry hook, cleanup). Run from the repo
+# root so relative imports resolve. Exit 0 + "PASSED" = the server chain works.
+$headlessOutput = (node --experimental-strip-types (Join-Path $repoRoot "test\install-verify.ts") 2>&1 | Out-String).Trim()
+Assert-Check "headless server behavior (install-verify.ts)" ($headlessOutput.Contains("HEADLESS INSTALL VERIFICATION PASSED")) "exit=$LASTEXITCODE"
 
 Write-Output "----"
 if ($script:failures -eq 0) {
