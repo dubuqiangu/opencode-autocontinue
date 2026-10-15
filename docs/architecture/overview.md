@@ -13,7 +13,7 @@ OpenCode V2 服务端 + TUI 插件：自动续跑因非用户原因中断、但�
 
 ## 运行环境与加载机制
 
-1. **发现**：OpenCode 启动时读取 `package.json` 的 `exports`——`"."` → `src/index.ts`（server 插件）、`"./tui"` → `src/tui.tsx`（TUI 插件）
+1. **发现**：OpenCode 启动时读取 `package.json` 的 `exports`——`"."` → `src/index.ts`（server 插件）、`"./tui"` → `dist/tui.js`（TUI 插件，预构建 bundle；v0.3.9 起对齐 usage-meter/OMO-Slim 交付路径）
 2. **server 入口**：`Plugin.define({id, setup})`，注册 retry hook + 事件订阅 + RPC
 3. **TUI 入口**：slash 命令 + footer 状态 slot（`@jsxImportSource @opentui/solid`）
 4. **生命周期**：`setup(context)` 执行一次；返回清理函数在卸载/重载时执行
@@ -44,6 +44,6 @@ TUI 插件
 ## 验证方式
 
 - **语法**：`node --check src/*.ts`（server 纯 TS）
-- **打包**：`npx esbuild src/index.ts` / `npx esbuild src/tui.tsx --loader:.tsx=tsx --jsx=automatic`
+- **打包**：`npm run build:tui`（esbuild bundle `src/tui.tsx` → `dist/tui.js`，`@opencode/*`/`@opentui/*`/`solid-js` 全 external，`exports["./tui"]` 指向 bundle）
 - **单元测试**：`node --test test/server.test.ts`（35 用例，覆盖解析/判定矩阵/节流/时段/排除/完成标记/并发/跨日窗口）
 - **真机**：本地 `file://` 加载，重启后验证 on/status/off、错误/空闲注入、完成标记停止
