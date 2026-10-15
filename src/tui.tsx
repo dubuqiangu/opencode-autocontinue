@@ -94,6 +94,13 @@ export default Plugin.define({
     // cache the last-seen sessionID here and have the command prefer it.
     let lastSlotSessionID: string | undefined
 
+    // Sidebar Watch-block collapse state. Declared at setup scope (not inside
+    // SidebarStatus) because the host re-mounts the sidebar slot often — a
+    // per-mount createSignal would reset the fold on every re-mount, making
+    // the header click appear dead. Same reason usage-meter persists its
+    // statsBlockCollapsed flag in the settings store.
+    const [isCollapsed, setIsCollapsed] = createSignal(false)
+
     // Reuse a single RPC subclient for the plugin lifetime (avoid leaking a
     // subclient per call).
     let cachedRpcClient: RpcClient | undefined
@@ -253,11 +260,12 @@ export default Plugin.define({
       // content(): insertExpression wraps each thunk in a render effect, so
       // null removes the subtree and non-null inserts it — on appears
       // immediately, off vanishes immediately, no host re-mount. The title row
-      // is collapsible like usage-meter's Stats header: a click flips a local
-      // collapsed signal and requests an immediate repaint. All dynamic reads
-      // are function children ({() => ...}) — JSX interpolations are evaluated
-      // once in the untracked component body and would freeze.
-      const [isCollapsed, setIsCollapsed] = createSignal(false)
+      // is collapsible like usage-meter's Stats header: a click flips the
+      // shared setup-scope collapsed signal (v0.3.10 — a per-mount signal
+      // would be reset every host sidebar re-mount) and requests an immediate
+      // repaint. All dynamic reads are function children ({() => ...}) — JSX
+      // interpolations are evaluated once in the untracked component body and
+      // would freeze.
       const muted = context.theme?.text?.muted
       return (
         <box flexDirection="column">

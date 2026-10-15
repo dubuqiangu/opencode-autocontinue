@@ -150,6 +150,7 @@ var tui_default = Plugin.define({
       }
     };
     let lastSlotSessionID;
+    const [isCollapsed, setIsCollapsed] = createSignal(false);
     let cachedRpcClient;
     function rpcClient() {
       if (cachedRpcClient !== void 0) return cachedRpcClient;
@@ -251,7 +252,6 @@ var tui_default = Plugin.define({
         metricLines.push(`\u{1F3AF} ${status.state}`);
         return metricLines.join("\n");
       });
-      const [isCollapsed, setIsCollapsed] = createSignal(false);
       const muted = context.theme?.text?.muted;
       return /* @__PURE__ */ jsx("box", { flexDirection: "column", children: () => content() !== null ? /* @__PURE__ */ jsxs("box", { flexDirection: "column", children: [
         /* @__PURE__ */ jsx(
