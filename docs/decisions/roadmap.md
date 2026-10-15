@@ -15,7 +15,8 @@
 
 | 项 | 状态 |
 |---|---|
-| D1 本地 `file://` 加载 + `/autocontinue on\|status\|off` 实测 | ⏳ 待实机 |
+| D1 `/autocontinue on\|status\|off` 命令链路 | ✅ 已真机确认（on → toast "Watch enabled"、server kv 写入、event 无异常；off 正常移除） |
+| D1b 侧栏 Watch 块活图验证（v0.3.9/v0.3.10） | ⏳ 待重启 TUI 后确认：on 立即出现 + ⏱ 每秒走动、off 立即消失、点击标题折叠且不被重挂载重置 |
 | D2 真实造错/空闲 → 续跑注入；完成标记 → 停 | ⏳ 待实机 |
 | D3 卸载/重装干净，无残留订阅 | ⏳ 待实机 |
 
