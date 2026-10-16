@@ -20,6 +20,7 @@ interface ServerContext {
     prompt(input: { sessionID: string; text: string }): Promise<unknown>
     hook(name: string, callback: (event: any) => void | Promise<void>): Promise<unknown>
     context(input: { sessionID: string }): Promise<readonly unknown[]>
+    get(input: { sessionID: string }): Promise<unknown>
   }
   event: {
     subscribe(options?: { signal?: AbortSignal }): AsyncIterable<EventLike>

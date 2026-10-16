@@ -125,6 +125,9 @@ export function looksIncomplete(text: string, parts: unknown): boolean {
   // C: short acknowledgement only.
   if (trimmed.length <= 8 && ACK_WORDS.has(trimmed.toLowerCase())) return true
   // B: tool_use present without a tool_result — tool execution is in flight.
+  // V1 parts use tool_use/tool_result. V2 content parts use { type: "tool",
+  // state: { status: "streaming"|"running"|"completed"|"error" } } — a tool is
+  // in flight until its status is a terminal "completed"/"error".
   if (Array.isArray(parts)) {
     let hasToolUse = false
     let hasToolResult = false
@@ -132,7 +135,13 @@ export function looksIncomplete(text: string, parts: unknown): boolean {
       if (!part || typeof part !== "object") continue
       const type = (part as { type?: string }).type
       if (type === "tool_use" || type === "tool") hasToolUse = true
-      if (type === "tool_result" || type === "tool") hasToolResult = true
+      if (type === "tool_result") hasToolResult = true
+      // V2 tool parts carry a terminal state.status when execution finished;
+      // a "streaming"/"running" tool part is still in flight.
+      const toolState = (part as { state?: { status?: string } }).state?.status
+      if (type === "tool" && (toolState === "completed" || toolState === "error")) {
+        hasToolResult = true
+      }
     }
     if (hasToolUse && !hasToolResult) return true
   }

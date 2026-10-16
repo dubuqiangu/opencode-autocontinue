@@ -398,6 +398,118 @@ test("title exclusion stops watching", async () => {
   assert.equal(store.status("ses_5").state?.state, "stopped")
 })
 
+// --- v2 host message/event shape regression tests ---
+// The v2 host (opencode 2.0.29) returns messages as { type, content } without
+// the v1 info/parts fields, and emits differently-named events. These tests
+// pin the v2 shapes so completion detection and event handling keep working
+// against the real host (they used to pass with v1-shaped mocks only).
+
+test("v2 message shape: completion marker is detected via content", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { type: "assistant", content: [{ type: "text", text: "完成，[任务完成]" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
+    events.push(state)
+  })
+  await store.watch("ses_v2_marker")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_marker" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /整体检查/)
+  assert.equal(store.status("ses_v2_marker").state?.state, "confirming")
+  assert.ok(events.includes("confirming"))
+})
+
+test("v2 message shape: question detection skips injection", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { type: "assistant", content: [{ type: "text", text: "你希望我继续深入哪部分？" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_v2_q")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_q" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_v2_q").state?.state, "watching")
+})
+
+test("v2 message shape: tool_use without tool_result skips injection", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    {
+      type: "assistant",
+      content: [
+        { type: "text", text: "正在执行脚本" },
+        { type: "tool", name: "bash", state: { status: "running" } },
+      ],
+    },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_v2_tool")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_tool" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_v2_tool").state?.state, "watching")
+})
+
+test("v2 title resolution via session.get stops watching", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [{ type: "user", text: "hello" }]
+  session.get = async () => ({ title: "测试会话" })
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_v2_title")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_title" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_v2_title").state?.state, "stopped")
+})
+
+test("v2 execution.failed schedules an injection on idle", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_v2_err")
+  await engine.handleEvent({
+    type: "session.execution.failed",
+    sessionID: "ses_v2_err",
+    data: { error: { message: "bad_response_status_code" } },
+  })
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_err" })
+  await new Promise((resolve) => setTimeout(resolve, 1_100))
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /^继续执行/)
+})
+
+test("v2 inbox enqueued user message resets the round and enters grace", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5, userGraceMs: 60_000 })
+  await store.watch("ses_v2_user")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_v2_user",
+    data: { item: { type: "user" } },
+  })
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_user" })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(session.prompts.length, 0) // inside grace -> rescheduled, not injected
+})
+
+test("v2 execution.interrupted marks stopped and does not inject", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_v2_stop")
+  await engine.handleEvent({ type: "session.execution.interrupted", sessionID: "ses_v2_stop" })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_v2_stop").state?.state, "stopped")
+})
+
 test("user message within grace window delays injection", async () => {
   const { session, store, engine } = await makeEngine({ idleDelayMs: 5, userGraceMs: 60_000 })
   await store.watch("ses_6")

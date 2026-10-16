@@ -35,6 +35,7 @@ export interface SessionLike {
   prompt(input: { sessionID: string; text: string }): Promise<unknown>
   hook(name: string, callback: (event: any) => void | Promise<void>): Promise<unknown>
   context(input: { sessionID: string }): Promise<readonly unknown[]>
+  get(input: { sessionID: string }): Promise<unknown>
 }
 
 export interface EventLike {
@@ -361,18 +362,25 @@ export class AutocontinueEngine {
     assistantCount: number
   }> {
     try {
-      const messages = (await this.session.context({ sessionID })) as Array<{
-        info?: { role?: string }
-        parts?: unknown
-      }>
+      // V1 messages carry { info: { role }, parts }, V2 carry
+      // { type: "assistant", content } — accept both so completion detection
+      // works against the actual host message shape (v2 host verified).
+      const messages = (await this.session.context({ sessionID })) as Array<
+        | { info?: { role?: string }; parts?: unknown }
+        | { type?: string; content?: unknown }
+      >
       let assistantCount = 0
       let latestText = ""
       let latestParts: unknown = undefined
       for (const message of messages) {
-        if (message.info?.role === "assistant") {
+        const role = (message as { info?: { role?: string } }).info?.role
+        const type = (message as { type?: string }).type
+        if (role === "assistant" || type === "assistant") {
           assistantCount += 1
-          latestText = messageText(message.parts)
-          latestParts = message.parts
+          const parts = (message as { parts?: unknown }).parts
+          const content = (message as { content?: unknown }).content
+          latestText = messageText(parts) || messageText(content)
+          latestParts = parts ?? content
         }
       }
       return { text: latestText, parts: latestParts, assistantCount }
@@ -385,10 +393,14 @@ export class AutocontinueEngine {
   private async resolveTitle(sessionID: string): Promise<string | undefined> {
     if (this.titleCache.has(sessionID)) return this.titleCache.get(sessionID)
     try {
+      // V1: title lives on a message's info. V2: title lives on the session
+      // (SessionInfo.title via session.get), not on individual messages.
       const messages = (await this.session.context({ sessionID })) as Array<{
         info?: { role?: string; title?: string }
       }>
-      const title = messages.find((message) => typeof message.info?.title === "string")?.info?.title
+      const title =
+        messages.find((message) => typeof message.info?.title === "string")?.info?.title ??
+        (await this.session.get({ sessionID }) as { title?: string } | null | undefined)?.title
       // P2-4: only cache when a title actually exists. Caching "" (or undefined)
       // would permanently exempt a session that later gains an excluded title
       // (e.g. "测试") from the title filter for the rest of the process.
@@ -419,15 +431,23 @@ export class AutocontinueEngine {
 
     switch (type) {
       case "session.status": {
-        const status = (event.properties?.status ?? event.status) as { type?: string } | string | undefined
+        // V1 nests status under properties; V2 carries it on data.
+        const status = (event.properties?.status ?? event.data?.status ?? event.status) as
+          | { type?: string }
+          | string
+          | undefined
         const statusType = typeof status === "string" ? status : status?.type
         if (statusType === "busy" || statusType === "retry") {
           memory.lastBusyAt = Date.now()
         }
         break
       }
-      case "session.error": {
-        const error = event.properties?.error ?? event.error
+      // V1 session.error; V2 surfaces retryable provider failures as
+      // session.execution.failed / session.retry.scheduled (data.error).
+      case "session.error":
+      case "session.execution.failed":
+      case "session.retry.scheduled": {
+        const error = event.properties?.error ?? event.data?.error ?? event.error
         if (isRetryableError(error, cfg.errorPatterns, cfg.excludePatterns)) {
           memory.pendingContinue = true
           memory.pendingContinueAt = Date.now()
@@ -435,11 +455,12 @@ export class AutocontinueEngine {
         break
       }
       case "session.idle": {
-        // User manually stopped the run (Esc) — opencode emits an idle event
-        // with outcome "interrupted" (the assistant message carries error
-        // {type:"aborted"}). Treat it as an explicit stop: mark stopped and do
-        // not schedule any further injection. Other idle outcomes
-        // (succeeded/failed) keep the existing continue-on-idle behavior.
+        // V1: opencode emits an idle event with outcome "interrupted" when the
+        // user manually stopped the run (Esc). V2: interruption is its own
+        // event (session.execution.interrupted) — handled below. Treat the V1
+        // interrupted outcome as an explicit stop: mark stopped and do not
+        // schedule any further injection. Other idle outcomes (succeeded/
+        // failed) keep the existing continue-on-idle behavior.
         if (idleOutcomeFromEvent(event) === "interrupted") {
           await this.store.markStopped(sessionID)
           this.clearTimer(sessionID)
@@ -457,9 +478,34 @@ export class AutocontinueEngine {
         }
         break
       }
-      case "message.updated": {
-        // P2-5: accept both nested and flat info (session.status/error already do).
+      case "session.execution.interrupted": {
+        // V2: user manually stopped the run (Esc) — explicit stop, mirroring the
+        // V1 idle-with-outcome=interrupted path above.
+        await this.store.markStopped(sessionID)
+        this.clearTimer(sessionID)
+        this.stopInterval(sessionID)
+        void this.emitChangedInternal(sessionID, "stopped")
+        break
+      }
+      // V1 message.updated carries a message info; V2 surfaces new user/assistant
+      // messages as session.inbox.enqueued (user) and streaming assistant
+      // content as session.message.content.updated. Handle all three so the
+      // user-reset and completion-detection paths work against the actual host.
+      case "message.updated":
+      case "session.inbox.enqueued":
+      case "session.message.content.updated": {
+        // V1: info is nested (properties.info) or flat. V2: the inbox item
+        // carries the user/synthetic/compaction distinction on data.item.
         const info = event.properties?.info ?? event.info
+        const inboxItem = event.data?.item as { type?: string } | undefined
+        if (inboxItem?.type === "user") {
+          memory.lastUserMessageAt = Date.now()
+          await this.store.resume(sessionID, true)
+          this.confirmingAtAssistantCount.delete(sessionID)
+          this.scheduleInterval(sessionID)
+          void this.emitChangedInternal(sessionID, "watching")
+          break
+        }
         if (!info || typeof info !== "object") break
         const role = (info as { role?: string }).role
         if (role === "user") {
