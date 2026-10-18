@@ -287,6 +287,12 @@ export class AutocontinueEngine {
       const latest = await this.latestAssistantText(sessionID)
       const hasMarker = hasCompletionMarker(latest.text, matcher)
 
+      // User's guard: if a background subagent/task is still running, do NOT
+      // mark done and do NOT inject a continuation — the overall task is not
+      // complete until the background work settles. Keep watching so the next
+      // trigger re-checks once the subagent finishes.
+      if (latest.backgroundWorkRunning) return
+
       // While confirming (whole-project review round in flight), a second
       // completion marker only counts if it appears in a NEW assistant message
       // produced after the finalCheckMessage injection. Until the model
@@ -360,6 +366,7 @@ export class AutocontinueEngine {
     text: string
     parts: unknown
     assistantCount: number
+    backgroundWorkRunning: boolean
   }> {
     try {
       // V1 messages carry { info: { role }, parts }, V2 carry
@@ -372,6 +379,7 @@ export class AutocontinueEngine {
       let assistantCount = 0
       let latestText = ""
       let latestParts: unknown = undefined
+      let backgroundWorkRunning = false
       for (const message of messages) {
         const role = (message as { info?: { role?: string } }).info?.role
         const type = (message as { type?: string }).type
@@ -382,12 +390,29 @@ export class AutocontinueEngine {
           latestText = messageText(parts) || messageText(content)
           latestParts = parts ?? content
         }
+        // Background subagent/task in flight: a synthetic message whose metadata
+        // says it is a subagent and has no terminal state yet means the overall
+        // task is NOT done even if the latest assistant text carries a
+        // completion marker. Terminal states: completed / cancelled / error /
+        // failed. A running subagent has no state (or state === "running").
+        if (type === "synthetic") {
+          const metadata = (message as { metadata?: { source?: string; state?: string } }).metadata
+          if (metadata?.source === "subagent") {
+            const subagentState = metadata.state
+            const terminal =
+              subagentState === "completed" ||
+              subagentState === "cancelled" ||
+              subagentState === "error" ||
+              subagentState === "failed"
+            if (!terminal) backgroundWorkRunning = true
+          }
+        }
       }
-      return { text: latestText, parts: latestParts, assistantCount }
+      return { text: latestText, parts: latestParts, assistantCount, backgroundWorkRunning }
     } catch {
       // Fall through to empty.
     }
-    return { text: "", parts: undefined, assistantCount: 0 }
+    return { text: "", parts: undefined, assistantCount: 0, backgroundWorkRunning: false }
   }
 
   private async resolveTitle(sessionID: string): Promise<string | undefined> {
@@ -542,6 +567,9 @@ export class AutocontinueEngine {
             const latest = await this.latestAssistantText(sessionID)
             const hasMarker = hasCompletionMarker(latest.text, matcher)
             const current = this.store.getState(sessionID)
+            // User's guard: a running background subagent means the overall task
+            // is not done — skip completion decisions until it settles.
+            if (latest.backgroundWorkRunning) break
             if (current?.state === "confirming") {
               // Same B1/B2 guards as maybeInject: a second marker only counts
               // in a NEW assistant message; a non-marker review reply returns

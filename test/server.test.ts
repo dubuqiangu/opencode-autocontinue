@@ -310,6 +310,49 @@ test("completion marker with final check enabled runs the review round, not done
   assert.ok(events.includes("confirming"))
 })
 
+test("completion marker with a running background subagent stays watching (no done/inject)", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "主流程完成，[任务完成]" }] },
+    { type: "synthetic", metadata: { source: "subagent", childID: "ses_child", agent: "fixer" } },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
+    events.push(state)
+  })
+  await store.watch("ses_guard")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_guard" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  // Marker present but a subagent is still running: do not inject, do not
+  // confirm, do not mark done — keep watching until the background work settles.
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.status("ses_guard").state?.state, "watching")
+  assert.ok(!events.includes("confirming"))
+  assert.ok(!events.includes("done"))
+})
+
+test("completion marker with a finished background subagent confirms normally", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "全部完成，[任务完成]" }] },
+    { type: "synthetic", metadata: { source: "subagent", childID: "ses_child", agent: "fixer", state: "completed" } },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
+    events.push(state)
+  })
+  await store.watch("ses_guard2")
+  await engine.handleEvent({ type: "session.idle", sessionID: "ses_guard2" })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  // Subagent finished: the marker runs the normal final-check review round.
+  assert.equal(session.prompts.length, 1)
+  assert.equal(store.status("ses_guard2").state?.state, "confirming")
+})
+
 test("looksIncomplete detects questions, in-flight tools, and short acks", () => {
   // A: ends with a question mark — the model is asking the user.
   assert.equal(looksIncomplete("需要我继续吗？", []), true)

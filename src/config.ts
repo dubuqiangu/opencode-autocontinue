@@ -75,7 +75,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   ],
   excludePatterns: ["MessageAbortedError", "operation was aborted"],
   excludeTitleKeywords: ["测试"],
-  userGraceMs: 300_000,
+  userGraceMs: 15_000,
   intervalMs: 3_600_000,
 }
 
