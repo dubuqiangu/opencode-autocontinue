@@ -772,6 +772,34 @@ test("maybeInject skips when the model was active within 60s", async () => {
   assert.equal(session.prompts.length, 0)
 })
 
+test("maybeInject skips while the session is actively running/streaming", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000, idleDelayMs: 60_000 })
+  await store.watch("ses_k3r")
+  // A live run (execution/step event) just refreshed lastActiveAt.
+  store.getMemory("ses_k3r").lastActiveAt = Date.now()
+  await engine.maybeInject("ses_k3r")
+  assert.equal(session.prompts.length, 0)
+})
+
+test("maybeInject proceeds once the running session settles", async () => {
+  const { session, store, engine } = await makeEngine({ intervalMs: 60_000, idleDelayMs: 5 })
+  await store.watch("ses_k3s")
+  // lastActiveAt lapsed past the idleDelayMs grace — the run has settled.
+  store.getMemory("ses_k3s").lastActiveAt = Date.now() - 60_000
+  await engine.maybeInject("ses_k3s")
+  assert.equal(session.prompts.length, 1)
+})
+
+test("execution.started / step.started / step.streamed events refresh lastActiveAt", async () => {
+  const { store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_k3e")
+  await engine.handleEvent({ type: "session.execution.started", sessionID: "ses_k3e", data: { sessionID: "ses_k3e" } })
+  assert.ok(store.getMemory("ses_k3e").lastActiveAt > 0)
+  store.getMemory("ses_k3e").lastActiveAt = 0
+  await engine.handleEvent({ type: "session.step.streamed", sessionID: "ses_k3e", data: { sessionID: "ses_k3e" } })
+  assert.ok(store.getMemory("ses_k3e").lastActiveAt > 0)
+})
+
 test("maybeInject stops for a session that is no longer watching", async () => {
   const { session, store, engine } = await makeEngine({ intervalMs: 60_000 })
   await store.watch("ses_k4")

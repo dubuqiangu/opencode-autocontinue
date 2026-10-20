@@ -275,6 +275,11 @@ export class AutocontinueEngine {
       // Model active recently (busy/retry within the last 60s) — don't interrupt.
       if (memory.lastBusyAt && Date.now() - memory.lastBusyAt < 60_000) return
 
+      // Session actively running/streaming (execution started, step started/
+      // streamed, or busy status) — don't poke a live run. idleDelayMs grace so
+      // a just-settled session can be resumed promptly.
+      if (memory.lastActiveAt && Date.now() - memory.lastActiveAt < cfg.idleDelayMs) return
+
       // Min interval between injections.
       if (entry.lastInjectedAt && Date.now() - entry.lastInjectedAt < cfg.minIntervalMs) {
         const remaining = cfg.minIntervalMs - (Date.now() - entry.lastInjectedAt)
@@ -464,7 +469,17 @@ export class AutocontinueEngine {
         const statusType = typeof status === "string" ? status : status?.type
         if (statusType === "busy" || statusType === "retry") {
           memory.lastBusyAt = Date.now()
+          memory.lastActiveAt = Date.now()
         }
+        break
+      }
+      // V2 surfaces an active run via execution/step events. Any of these means
+      // the session is currently working (streaming or executing) — refresh the
+      // lastActiveAt stamp so maybeInject holds off poking a live run.
+      case "session.execution.started":
+      case "session.step.started":
+      case "session.step.streamed": {
+        memory.lastActiveAt = Date.now()
         break
       }
       // V1 session.error; V2 surfaces retryable provider failures as

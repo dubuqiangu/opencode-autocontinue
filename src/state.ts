@@ -17,6 +17,10 @@ export interface InMemoryState {
   pendingContinueAt: number
   lastUserMessageAt: number
   lastBusyAt: number
+  /** Epoch ms of the most recent "session actively running/streaming" signal
+   *  (execution started, step started/streamed, or busy status). Injection is
+   *  gated until this settles, so a still-running session is never poked. */
+  lastActiveAt: number
 }
 
 export class WatchStore {
@@ -100,6 +104,7 @@ export class WatchStore {
         pendingContinueAt: 0,
         lastUserMessageAt: 0,
         lastBusyAt: 0,
+        lastActiveAt: 0,
       }
       this.inMemory.set(sessionID, memory)
     }
