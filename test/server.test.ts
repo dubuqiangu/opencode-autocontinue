@@ -990,6 +990,14 @@ test("mergeConfig clamps intervalMs to a minimum of 1s (P2-7)", () => {
   assert.equal(merged.intervalMs, 1_000)
 })
 
+test("mergeConfig keeps intervalMs 0 to disable periodic checks", () => {
+  // The doc contract (intervalMs: 0 = disabled) must survive the P2-7 floor:
+  // only positive values clamp to 1s; 0 passes through so scheduleInterval's
+  // `<= 0` disable path is reachable from config.
+  const merged = mergeConfig(DEFAULT_CONFIG, { intervalMs: 0 })
+  assert.equal(merged.intervalMs, 0)
+})
+
 test("renderMessage renders 不限 when there is no time window (P3-3)", () => {
   const text = renderMessage("剩余 {remaining}", 0)
   assert.match(text, /不限/)

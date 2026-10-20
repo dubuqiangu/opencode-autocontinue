@@ -177,7 +177,12 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
     )
   }
   if (typeof overrides.userGraceMs === "number") merged.userGraceMs = overrides.userGraceMs
-  if (typeof overrides.intervalMs === "number") merged.intervalMs = Math.max(1_000, overrides.intervalMs)
+  // intervalMs: 0 means periodic checks disabled (scheduleInterval honors <=0).
+  // Preserve the P2-7 anti-spam floor (min 1s) only for positive values, so the
+  // documented "0 = disabled" escape hatch is actually reachable via config.
+  if (typeof overrides.intervalMs === "number") {
+    merged.intervalMs = overrides.intervalMs <= 0 ? 0 : Math.max(1_000, overrides.intervalMs)
+  }
   return merged
 }
 

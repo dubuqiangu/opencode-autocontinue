@@ -48,6 +48,17 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   let emitStateChanged: (sessionID: string, state: string, injections: number) => Promise<void> = async () => {}
   const rpcContract = AUTOCONTINUE_RPC_CONTRACT
 
+  // Construct the engine BEFORE rpcImplementation: rpcImplementation.set calls
+  // engine.scheduleInterval/stopInterval/clearTimer/forgetSession, and
+  // ctx.rpc.register runs below. Declaring engine after rpcImplementation put
+  // those calls in the const's TDZ — safe only because register stores the
+  // impl without synchronously invoking a method. Constructing first removes
+  // the latent ReferenceError hazard. emitStateChanged is captured by
+  // reference (let), so its later reassignment to the RPC emitter is visible.
+  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, injections) => {
+    void emitStateChanged(sessionID, state, injections)
+  })
+
   const rpcImplementation = {
     async set(input: { sessionID: string; enabled: boolean }) {
       if (input.enabled) {
@@ -88,9 +99,6 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
     console.error("[opencode-autocontinue] RPC registration failed (TUI status unavailable):", error)
   }
 
-  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, injections) => {
-    void emitStateChanged(sessionID, state, injections)
-  })
   await engine.installRetryHook()
   // Sessions restored from storage (hydrate) should resume their keep-alive
   // heartbeat without waiting for a new /autocontinue on.
