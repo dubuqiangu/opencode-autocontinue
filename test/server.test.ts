@@ -377,6 +377,32 @@ test("looksIncomplete detects questions, in-flight tools, and short acks", () =>
   assert.equal(looksIncomplete("已完成第一阶段的代码审查，共发现 3 个问题。", []), false)
 })
 
+test("looksIncomplete treats a stale non-terminal V2 tool as dead, not in flight", () => {
+  // A non-terminal V2 tool with RECENT activity is still in flight — skip.
+  assert.equal(
+    looksIncomplete("执行中", [
+      { type: "tool", name: "shell", state: { status: "streaming" }, time: { created: Date.now() - 1_000 } },
+    ]),
+    true,
+  )
+  // An ORPHANED non-terminal V2 tool (status stuck at "streaming", no advance
+  // for longer than the staleness window — aborted/interrupted mid-call) is
+  // DEAD. It must not lock the session so the watchdog can resume it.
+  assert.equal(
+    looksIncomplete("执行中", [
+      { type: "tool", name: "shell", state: { status: "streaming" }, time: { created: Date.now() - 300_000 } },
+    ]),
+    false,
+  )
+  // A terminal V2 tool is not incomplete regardless of age.
+  assert.equal(
+    looksIncomplete("执行完成", [
+      { type: "tool", name: "shell", state: { status: "completed" }, time: { created: Date.now() - 300_000 } },
+    ]),
+    false,
+  )
+})
+
 test("idle does not inject when the model is asking a question", async () => {
   const session = makeFakeSession()
   session.context = async () => [

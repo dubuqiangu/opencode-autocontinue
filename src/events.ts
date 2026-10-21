@@ -117,8 +117,16 @@ const ACK_WORDS = new Set([
  *   B. last message has a tool_use part without a matching tool_result — the
  *      tool call is in flight (streaming part may not have resolved yet)
  *   C. very short acknowledgement text ("好的", "OK") — waiting for the next
- *      instruction, not finished with the task */
-export function looksIncomplete(text: string, parts: unknown): boolean {
+ *      instruction, not finished with the task
+ *
+ *  Rule B is time-aware for V2 tool parts (`{type:"tool", state:{status},
+ *  time:{...}}`): a NON-terminal tool only counts as "in flight" while it is
+ *  recently active. An orphaned tool — status stuck at "streaming"/"running"
+ *  with no advance past `toolStaleMs` (aborted/interrupted mid-call, the host
+ *  never wrote a terminal state) — is DEAD, not in flight, and must not lock
+ *  the session so the watchdog can resume it. V1 `tool_use` parts (no `time`
+ *  field) keep the strict always-in-flight behavior. */
+export function looksIncomplete(text: string, parts: unknown, toolStaleMs = 60_000): boolean {
   const trimmed = text.trim()
   // A: question at the end — the model is asking the user, not finished.
   if (/[?？]\s*$/.test(trimmed)) return true
@@ -131,19 +139,30 @@ export function looksIncomplete(text: string, parts: unknown): boolean {
   if (Array.isArray(parts)) {
     let hasToolUse = false
     let hasToolResult = false
+    let activeToolInFlight = false
     for (const part of parts) {
       if (!part || typeof part !== "object") continue
       const type = (part as { type?: string }).type
       if (type === "tool_use" || type === "tool") hasToolUse = true
       if (type === "tool_result") hasToolResult = true
+      // V1 tool_use parts have no time field — always treated as in flight.
+      if (type === "tool_use") activeToolInFlight = true
       // V2 tool parts carry a terminal state.status when execution finished;
-      // a "streaming"/"running" tool part is still in flight.
+      // a "streaming"/"running" tool part is in flight only while active.
       const toolState = (part as { state?: { status?: string } }).state?.status
       if (type === "tool" && (toolState === "completed" || toolState === "error")) {
         hasToolResult = true
       }
+      if (type === "tool" && toolState !== "completed" && toolState !== "error") {
+        const toolTime = (part as { time?: { streamed?: number; created?: number } }).time
+        const lastActivity = toolTime?.streamed ?? toolTime?.created
+        // No time field = unknown, keep it conservative (in flight).
+        if (lastActivity === undefined || Date.now() - lastActivity <= toolStaleMs) {
+          activeToolInFlight = true
+        }
+      }
     }
-    if (hasToolUse && !hasToolResult) return true
+    if (hasToolUse && !hasToolResult && activeToolInFlight) return true
   }
   return false
 }
