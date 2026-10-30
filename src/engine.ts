@@ -116,6 +116,7 @@ export class AutocontinueEngine {
     sessionID: string,
     state: WatchState["state"],
     injections: number,
+    totalInjections: number,
   ) => void
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Per-session interval timers (periodic re-checks). */
@@ -133,7 +134,12 @@ export class AutocontinueEngine {
     session: SessionLike,
     config: () => PluginConfig,
     store: WatchStore,
-    emitChanged: (sessionID: string, state: WatchState["state"], injections: number) => void,
+    emitChanged: (
+      sessionID: string,
+      state: WatchState["state"],
+      injections: number,
+      totalInjections: number,
+    ) => void,
   ) {
     this.session = session
     this.config = config
@@ -443,7 +449,7 @@ export class AutocontinueEngine {
 
   private async emitChangedInternal(sessionID: string, state: WatchState["state"]): Promise<void> {
     const entry = this.store.getState(sessionID)
-    this.emitChanged(sessionID, state, entry?.injections ?? 0)
+    this.emitChanged(sessionID, state, entry?.injections ?? 0, entry?.totalInjections ?? 0)
   }
 
   /** Handle a single server event. */

@@ -38,10 +38,11 @@ var AUTOCONTINUE_RPC_CONTRACT = {
               sessionID: { type: "string" },
               state: { type: "string" },
               injections: { type: "number" },
+              totalInjections: { type: "number" },
               lastInjectedAt: { type: "number" },
               since: { type: "number" }
             },
-            required: ["sessionID", "state", "injections", "since"],
+            required: ["sessionID", "state", "injections", "totalInjections", "since"],
             additionalProperties: false
           }
         },
@@ -66,9 +67,10 @@ var AUTOCONTINUE_RPC_CONTRACT = {
         properties: {
           sessionID: { type: "string" },
           state: { type: "string" },
-          injections: { type: "number" }
+          injections: { type: "number" },
+          totalInjections: { type: "number" }
         },
-        required: ["sessionID", "state", "injections"],
+        required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false
       }
     }
@@ -176,7 +178,7 @@ var tui_default = Plugin.define({
       if (!rpc) throw new Error("autocontinue RPC unavailable");
       const result = await rpc.set({ sessionID, enabled });
       if (enabled) {
-        updateStatus(sessionID, { sessionID, state: "watching", injections: 0 });
+        updateStatus(sessionID, { sessionID, state: "watching", injections: 0, totalInjections: 0 });
         void refreshStatus(sessionID);
       } else {
         updateStatus(sessionID, void 0);
@@ -248,7 +250,10 @@ var tui_default = Plugin.define({
             typeof status.since === "number" ? `\u23F1 ${formatDuration(now() - status.since)}` : "\u23F1 \u2026"
           );
         }
-        metricLines.push(`\u{1F504} ${status.injections} injection${status.injections === 1 ? "" : "s"}`);
+        const lifetime = typeof status.totalInjections === "number" ? status.totalInjections : status.injections;
+        const roundIn = status.injections;
+        const roundSuffix = typeof status.totalInjections === "number" && roundIn !== lifetime ? ` (${roundIn} this round)` : "";
+        metricLines.push(`\u{1F504} ${lifetime} injection${lifetime === 1 ? "" : "s"}${roundSuffix}`);
         metricLines.push(`\u{1F3AF} ${status.state}`);
         return metricLines.join("\n");
       });
@@ -380,12 +385,19 @@ var tui_default = Plugin.define({
           const sessionID = event?.data?.sessionID ?? event?.properties?.sessionID ?? event?.sessionID;
           const state = event?.data?.state ?? event?.properties?.state;
           const injections = event?.data?.injections ?? event?.properties?.injections ?? 0;
+          const totalInjections = event?.data?.totalInjections ?? event?.properties?.totalInjections;
           if (typeof sessionID !== "string") return;
           if (state === "stopped") {
             void refreshStatus(sessionID);
           } else if (state === "watching" || state === "confirming" || state === "done") {
             const current = statusOf(sessionID);
-            updateStatus(sessionID, { ...current ?? {}, sessionID, state, injections });
+            updateStatus(sessionID, {
+              ...current ?? {},
+              sessionID,
+              state,
+              injections,
+              ...typeof totalInjections === "number" ? { totalInjections } : {}
+            });
           }
         });
         if (typeof unsubscribe === "function") stopEvents = unsubscribe;

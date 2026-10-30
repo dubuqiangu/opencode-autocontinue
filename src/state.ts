@@ -60,6 +60,7 @@ export class WatchStore {
             sessionID,
             state: entry.state === "done" || entry.state === "stopped" ? entry.state : "watching",
             injections: typeof entry.injections === "number" ? entry.injections : legacyTotal,
+            totalInjections: typeof entry.totalInjections === "number" ? entry.totalInjections : legacyTotal,
             since: typeof entry.since === "number" ? entry.since : now,
             endAt: typeof entry.endAt === "number" ? entry.endAt : 0,
             ...(typeof entry.lastInjectedAt === "number" ? { lastInjectedAt: entry.lastInjectedAt } : {}),
@@ -118,6 +119,7 @@ export class WatchStore {
       sessionID,
       since: now,
       injections: 0,
+      totalInjections: 0,
       state: "watching",
       endAt,
     }
@@ -139,6 +141,7 @@ export class WatchStore {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.injections += 1
+    entry.totalInjections += 1
     entry.lastInjectedAt = Date.now()
     await this.persist()
   }
@@ -218,6 +221,7 @@ export class WatchStore {
         sessionID: entry.sessionID,
         state: entry.state,
         injections: entry.injections,
+        totalInjections: entry.totalInjections,
         // Omit lastInjectedAt when never injected: the runtime schema
         // validator rejects undefined against {type:"number"}.
         ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
@@ -231,6 +235,7 @@ export class WatchStore {
       sessionID: entry.sessionID,
       state: entry.state,
       injections: entry.injections,
+      totalInjections: entry.totalInjections,
       ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
       since: entry.since,
     }))

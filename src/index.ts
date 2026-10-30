@@ -45,7 +45,12 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   await store.hydrate()
 
   // RPC events let the TUI refresh its footer live.
-  let emitStateChanged: (sessionID: string, state: string, injections: number) => Promise<void> = async () => {}
+  let emitStateChanged: (
+    sessionID: string,
+    state: string,
+    injections: number,
+    totalInjections: number,
+  ) => Promise<void> = async () => {}
   const rpcContract = AUTOCONTINUE_RPC_CONTRACT
 
   // Construct the engine BEFORE rpcImplementation: rpcImplementation.set calls
@@ -55,8 +60,8 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   // impl without synchronously invoking a method. Constructing first removes
   // the latent ReferenceError hazard. emitStateChanged is captured by
   // reference (let), so its later reassignment to the RPC emitter is visible.
-  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, injections) => {
-    void emitStateChanged(sessionID, state, injections)
+  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, injections, totalInjections) => {
+    void emitStateChanged(sessionID, state, injections, totalInjections)
   })
 
   const rpcImplementation = {
@@ -74,7 +79,12 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
       }
       const entry = store.getState(input.sessionID)
       const state = entry?.state ?? (input.enabled ? "watching" : "stopped")
-      void emitStateChanged(input.sessionID, state, entry?.injections ?? 0)
+      void emitStateChanged(
+        input.sessionID,
+        state,
+        entry?.injections ?? 0,
+        entry?.totalInjections ?? 0,
+      )
       return { state }
     },
     async status(input: { sessionID: string }) {
@@ -88,9 +98,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   let rpcRegistration: Awaited<ReturnType<ServerContext["rpc"]["register"]>> | undefined
   try {
     rpcRegistration = await ctx.rpc.register(rpcContract, rpcImplementation)
-    emitStateChanged = async (sessionID, state, injections) => {
+    emitStateChanged = async (sessionID, state, injections, totalInjections) => {
       try {
-        await rpcRegistration?.events.emit("state.changed", { sessionID, state, injections })
+        await rpcRegistration?.events.emit("state.changed", { sessionID, state, injections, totalInjections })
       } catch {
         // TUI may be disconnected; footer catches up on next status check.
       }

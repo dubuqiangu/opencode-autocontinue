@@ -39,6 +39,8 @@ interface WatchStatusView {
   sessionID: string
   state: "watching" | "confirming" | "stopped" | "done"
   injections: number
+  /** Lifetime injections for this watch (never reset by user turns). */
+  totalInjections?: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (drives the sidebar timer). */
   since?: number
@@ -135,7 +137,7 @@ export default Plugin.define({
       if (!rpc) throw new Error("autocontinue RPC unavailable")
       const result = await rpc.set({ sessionID, enabled })
       if (enabled) {
-        updateStatus(sessionID, { sessionID, state: "watching", injections: 0 })
+        updateStatus(sessionID, { sessionID, state: "watching", injections: 0, totalInjections: 0 })
         // Fetch the real WatchStatus (with since) so the sidebar timer starts
         // from the server-recorded start time, not the optimistic guess.
         void refreshStatus(sessionID)
@@ -246,7 +248,13 @@ export default Plugin.define({
             typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ …",
           )
         }
-        metricLines.push(`🔄 ${status.injections} injection${status.injections === 1 ? "" : "s"}`)
+        // 注入次数用「累计」：每轮真实用户消息会把 injections 清零，单看它会
+        // 误显示 0（让人以为插件没干活）。totalInjections 自本轮 watch 起累加，
+        // 括号内是本轮（自上次用户消息）的注入数。
+        const lifetime = typeof status.totalInjections === "number" ? status.totalInjections : status.injections
+        const roundIn = status.injections
+        const roundSuffix = typeof status.totalInjections === "number" && roundIn !== lifetime ? ` (${roundIn} this round)` : ""
+        metricLines.push(`🔄 ${lifetime} injection${lifetime === 1 ? "" : "s"}${roundSuffix}`)
         metricLines.push(`🎯 ${status.state}`)
         return metricLines.join("\n")
       })
@@ -430,6 +438,8 @@ export default Plugin.define({
           const sessionID = event?.data?.sessionID ?? event?.properties?.sessionID ?? event?.sessionID
           const state = event?.data?.state ?? event?.properties?.state
           const injections = event?.data?.injections ?? event?.properties?.injections ?? 0
+          const totalInjections: number | undefined =
+            event?.data?.totalInjections ?? event?.properties?.totalInjections
           if (typeof sessionID !== "string") return
           if (state === "stopped") {
             // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
@@ -442,7 +452,13 @@ export default Plugin.define({
             // survive — the RPC event only carries sessionID/state/injections,
             // and dropping `since` would freeze the sidebar ⏱ to "⏱ …" (H1).
             const current = statusOf(sessionID)
-            updateStatus(sessionID, { ...(current ?? {}), sessionID, state, injections })
+            updateStatus(sessionID, {
+              ...(current ?? {}),
+              sessionID,
+              state,
+              injections,
+              ...(typeof totalInjections === "number" ? { totalInjections } : {}),
+            })
           }
         })
         if (typeof unsubscribe === "function") stopEvents = unsubscribe

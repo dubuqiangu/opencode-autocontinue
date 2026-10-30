@@ -51,10 +51,11 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
               sessionID: { type: "string" },
               state: { type: "string" },
               injections: { type: "number" },
+              totalInjections: { type: "number" },
               lastInjectedAt: { type: "number" },
               since: { type: "number" },
             },
-            required: ["sessionID", "state", "injections", "since"],
+            required: ["sessionID", "state", "injections", "totalInjections", "since"],
             additionalProperties: false,
           },
         },
@@ -80,8 +81,9 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
           sessionID: { type: "string" },
           state: { type: "string" },
           injections: { type: "number" },
+          totalInjections: { type: "number" },
         },
-        required: ["sessionID", "state", "injections"],
+        required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false,
       },
     },
@@ -91,8 +93,13 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
 export interface WatchState {
   sessionID: string
   since: number
-  /** Total injections (retries + final checks + periodic) in the current round. */
+  /** Injections in the CURRENT round (since the last real user message). Reset
+   *  to 0 on resume(); drives the maxConsecutive self-throttle cap. */
   injections: number
+  /** Lifetime injection count for this watch: never reset by resume()/user
+   *  messages, only by a fresh watch(). This is the honest "did the watchdog do
+   *  any work?" metric — `injections` alone reads 0 right after a user turn. */
+  totalInjections: number
   lastInjectedAt?: number
   /** End of the current watch window (epoch ms). 0 = no window. Set at watch/resume time. */
   endAt?: number
@@ -103,6 +110,8 @@ export interface WatchStatus {
   sessionID: string
   state: WatchState["state"]
   injections: number
+  /** Lifetime injection count (never reset by user turns). */
+  totalInjections: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (for the sidebar timer). */
   since: number
@@ -131,8 +140,9 @@ export interface RpcContract {
           sessionID: { type: "string" }
           state: { type: "string" }
           injections: { type: "number" }
+          totalInjections: { type: "number" }
         }
-        required: ["sessionID", "state", "injections"]
+        required: ["sessionID", "state", "injections", "totalInjections"]
         additionalProperties: false
       }
     }
