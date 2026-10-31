@@ -29,7 +29,9 @@ retry 层救不回（最终失败）才走会话级续跑兜底——两层互�
 5. 距上次真实用户消息是否足够久（> `userGraceMs`）？
 6. 会话当前是否非 busy？（`session.status` 非 idle 时绝不注入，轮询等待）
 
-通过 → `session.prompt({sessionID, text})` 注入续跑消息（`resume: true`）。
+通过 → `session.synthetic({sessionID, text, metadata, resume: true})` 注入续跑消息；宿主不支持
+`session.synthetic`（或调用失败）时退回 `session.prompt({sessionID, text, metadata})`。两路都带溯源
+metadata（`origin: "opencode-autocontinue"`），使注入回流不被误判为真实用户消息。
 
 **并发防护**：`tryInject` 入口即置 `inFlight`，中间有多个 `await`（解析标题、取最新消息），并发事件/定时器不会再通过检查。注入前还会复查会话仍处于 `watching`——`await` 期间可能已被 unwatch / markDone / markStopped，此时放弃注入。
 

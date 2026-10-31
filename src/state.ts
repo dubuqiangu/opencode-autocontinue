@@ -21,6 +21,12 @@ export interface InMemoryState {
    *  (execution started, step started/streamed, or busy status). Injection is
    *  gated until this settles, so a still-running session is never poked. */
   lastActiveAt: number
+  /** Last continuation this plugin injected, for the host-agnostic self-echo
+   *  guard: a matching inbound "user" message is our own injection returning,
+   *  not a real user turn. */
+  lastSelfInjection?: { text: string; at: number }
+  /** Aborts a still-running verification command (off / dispose / new round). */
+  activeVerifyAbort?: AbortController
 }
 
 export class WatchStore {
@@ -63,6 +69,10 @@ export class WatchStore {
             totalInjections: typeof entry.totalInjections === "number" ? entry.totalInjections : legacyTotal,
             since: typeof entry.since === "number" ? entry.since : now,
             endAt: typeof entry.endAt === "number" ? entry.endAt : 0,
+            // B-5: the field-by-field rebuild below would otherwise drop these
+            // (or carry NaN from a legacy row), so normalize each explicitly.
+            rejections: typeof entry.rejections === "number" ? entry.rejections : 0,
+            roundId: typeof entry.roundId === "number" ? entry.roundId : 0,
             ...(typeof entry.lastInjectedAt === "number" ? { lastInjectedAt: entry.lastInjectedAt } : {}),
           })
         }
@@ -120,6 +130,9 @@ export class WatchStore {
       since: now,
       injections: 0,
       totalInjections: 0,
+      rejections: 0,
+      // A fresh watch initializes the round id; resume() bumps it (see below).
+      roundId: 0,
       state: "watching",
       endAt,
     }
@@ -143,6 +156,14 @@ export class WatchStore {
     entry.injections += 1
     entry.totalInjections += 1
     entry.lastInjectedAt = Date.now()
+    await this.persist()
+  }
+
+  /** Count one failing verification round (verify-driven loop). */
+  async recordRejection(sessionID: string): Promise<void> {
+    const entry = this.watched.get(sessionID)
+    if (!entry) return
+    entry.rejections += 1
     await this.persist()
   }
 
@@ -188,6 +209,10 @@ export class WatchStore {
     if (!entry) return
     entry.state = "watching"
     entry.injections = 0
+    // A real user message starts a new round: its failures reset, and the round
+    // id advances so a verification result from the previous round is discarded.
+    entry.rejections = 0
+    entry.roundId += 1
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
     const memory = this.inMemory.get(sessionID)

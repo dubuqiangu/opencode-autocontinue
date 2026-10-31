@@ -73,3 +73,22 @@
 - 2026-10-03：src/*.ts 全部 `node --check` 通过；esbuild 打包通过（server 7 文件 + tui.tsx JSX）
 - 2026-10-03：`node --test test/server.test.ts` → 25/25 pass
 - 已实现：DESIGN.md 目录树 + 交互顺序图；README.md；tsconfig.json
+
+## 阶段 F：机理移植（参考 `MichengAI/dsh-pua`）⏳
+
+设计稿见 [docs/architecture/provenance-and-loop.md](docs/architecture/provenance-and-loop.md)。
+实施顺序 F1 → F2 → F3；每项独立可验证。
+
+- [ ] F1 注入溯源（修真实 bug：`maxConsecutive` 失效 + 误 arm `userGraceMs`）
+      - 注入优先 `session.synthetic`（带 `metadata{origin}`），回退 `session.prompt`（带 `metadata`）
+      - 引擎仅对**真实用户消息**调 `resume()`/写 `lastUserMessageAt`
+      - 验证：单测溯源判定矩阵（真实用户 / 插件注入 / prompt 回退）+ 实机查 `session_message.type`
+- [ ] F2 验证驱动续跑 Loop
+      - 新模块 `src/verify.ts`（`runVerification` / `verificationArgv` / `buildVerifyDetail`）
+      - config：`verifyCommand` / `verifyTimeoutMs` / `verifyMaxIterations` / `verifyCwd`
+      - 引擎：完成改按 exit code 判定；cap 前置但先跑一次验证（pass→done，否则 stopped）
+      - 验证：假 spawn 单测（pass/fail/timeout）+ 实机（恒真/恒假命令）
+- [ ] F3 升级式续跑提示 + 终止哨兵
+      - config：`escalationMessages[]` / `abortSentinel` / `pauseSentinel` / `doneSentinel`
+      - 按轮次分桶选提示；哨兵成对匹配；优先级 abort/pause > done > 续跑
+      - 验证：分桶单测 + 哨兵匹配单测

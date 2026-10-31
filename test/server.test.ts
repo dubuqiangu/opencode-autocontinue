@@ -107,7 +107,13 @@ test("hasCompletionMarker and titleExcluded", () => {
 })
 
 // --- prompt ---
-import { renderMessage, injectContinuation } from "../src/prompt.ts"
+import {
+  renderMessage,
+  injectContinuation,
+  isPluginInjection,
+  PROVENANCE_ORIGIN,
+  PROVENANCE_KIND,
+} from "../src/prompt.ts"
 
 test("renderMessage replaces {time} and {remaining}", () => {
   const out = renderMessage("now={time}, left={remaining}", Date.now() + 2 * 3_600_000)
@@ -129,8 +135,21 @@ test("injectContinuation calls session.prompt with rendered text", async () => {
 })
 
 // --- engine decision matrix ---
-import { AutocontinueEngine, computeEndAt, startTimeNotReached, retryHookHandler } from "../src/engine.ts"
+import {
+  AutocontinueEngine,
+  computeEndAt,
+  startTimeNotReached,
+  retryHookHandler,
+  selectEscalationMessage,
+} from "../src/engine.ts"
 import { WatchStore } from "../src/state.ts"
+import {
+  runVerification,
+  verificationArgv,
+  buildVerifyDetail,
+  stripControlChars,
+} from "../src/verify.ts"
+import type { SpawnAdapter } from "../src/verify.ts"
 
 class FakeStorage {
   private data = new Map<string, unknown>()
@@ -1125,4 +1144,523 @@ test("confirming second marker in a NEW assistant message marks done (B1 positiv
   await new Promise((resolve) => setTimeout(resolve, 60))
   assert.equal(store.status("ses_b3").state?.state, "done")
   assert.ok(events.includes("done"))
+})
+
+// --- #1 injection provenance ---
+// Our own injected continuation must never be mistaken for a real user message
+// (which would resume the round and zero the injection counter), and the
+// injection helper must prefer the structurally-distinct synthetic channel.
+
+test("isPluginInjection recognizes only our provenance origin", () => {
+  assert.equal(isPluginInjection(undefined), false)
+  assert.equal(isPluginInjection(null), false)
+  assert.equal(isPluginInjection({}), false)
+  assert.equal(isPluginInjection("opencode-autocontinue"), false)
+  assert.equal(isPluginInjection({ origin: "someone-else" }), false)
+  assert.equal(isPluginInjection({ origin: PROVENANCE_ORIGIN }), true)
+  assert.equal(isPluginInjection({ origin: PROVENANCE_ORIGIN, kind: PROVENANCE_KIND }), true)
+})
+
+test("injectContinuation prefers session.synthetic with provenance metadata", async () => {
+  let syntheticInput: any
+  let promptInput: any
+  const session = {
+    async synthetic(input: any) {
+      syntheticInput = input
+    },
+    async prompt(input: any) {
+      promptInput = input
+    },
+  }
+  await injectContinuation(session, "ses_syn", "继续 {time}", 0)
+  assert.equal(syntheticInput?.sessionID, "ses_syn")
+  assert.match(syntheticInput?.text ?? "", /^继续 /)
+  assert.equal(syntheticInput?.resume, true)
+  assert.equal(isPluginInjection(syntheticInput?.metadata), true)
+  assert.equal(promptInput, undefined)
+})
+
+test("injectContinuation falls back to prompt with provenance when synthetic is absent", async () => {
+  let promptInput: any
+  const session = {
+    async prompt(input: any) {
+      promptInput = input
+    },
+  }
+  await injectContinuation(session, "ses_fb", "继续", 0)
+  assert.equal(promptInput?.sessionID, "ses_fb")
+  assert.equal(promptInput?.text, "继续")
+  assert.equal(isPluginInjection(promptInput?.metadata), true)
+})
+
+test("injectContinuation falls back to prompt with provenance when synthetic throws", async () => {
+  let promptInput: any
+  const session = {
+    async synthetic() {
+      throw new Error("synthetic unsupported")
+    },
+    async prompt(input: any) {
+      promptInput = input
+    },
+  }
+  await injectContinuation(session, "ses_throw", "继续", 0)
+  assert.equal(promptInput?.sessionID, "ses_throw")
+  assert.equal(isPluginInjection(promptInput?.metadata), true)
+})
+
+/** Put a session mid-round (2 injections, confirming) so a resume() that
+ *  zeroes the counter / flips to watching is observable. */
+async function armSessionMidRound(store: WatchStore, sessionID: string) {
+  await store.watch(sessionID)
+  await store.recordInjection(sessionID)
+  await store.recordInjection(sessionID)
+  await store.beginConfirming(sessionID)
+}
+
+test("real user message without metadata resets the round", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_real")
+  await engine.handleEvent({
+    type: "message.updated",
+    sessionID: "ses_prov_real",
+    properties: { info: { role: "user" } },
+  })
+  const status = store.status("ses_prov_real")
+  assert.equal(status.state?.state, "watching")
+  assert.equal(status.state?.injections, 0)
+})
+
+test("inbox user message without metadata resets the round", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_inbox_real")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_prov_inbox_real",
+    data: { item: { type: "user" } },
+  })
+  const status = store.status("ses_prov_inbox_real")
+  assert.equal(status.state?.state, "watching")
+  assert.equal(status.state?.injections, 0)
+})
+
+test("plugin injection as type user does not reset the round", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_user")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_prov_user",
+    data: {
+      item: { type: "user", metadata: { origin: PROVENANCE_ORIGIN, kind: PROVENANCE_KIND } },
+    },
+  })
+  const status = store.status("ses_prov_user")
+  assert.equal(status.state?.state, "confirming")
+  assert.equal(status.state?.injections, 2)
+  assert.equal(store.getMemory("ses_prov_user").lastUserMessageAt, 0)
+})
+
+test("plugin injection as synthetic does not reset the round", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_syn")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_prov_syn",
+    data: {
+      item: { type: "synthetic", metadata: { origin: PROVENANCE_ORIGIN, kind: PROVENANCE_KIND } },
+    },
+  })
+  const status = store.status("ses_prov_syn")
+  assert.equal(status.state?.state, "confirming")
+  assert.equal(status.state?.injections, 2)
+})
+
+test("message.updated user info with provenance does not reset the round", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_info")
+  await engine.handleEvent({
+    type: "message.updated",
+    sessionID: "ses_prov_info",
+    properties: { info: { role: "user", metadata: { origin: PROVENANCE_ORIGIN } } },
+  })
+  const status = store.status("ses_prov_info")
+  assert.equal(status.state?.state, "confirming")
+  assert.equal(status.state?.injections, 2)
+  assert.equal(store.getMemory("ses_prov_info").lastUserMessageAt, 0)
+})
+
+test("plugin injection via item.payload.metadata does not reset the round (installed host)", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_payload")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_prov_payload",
+    data: {
+      item: {
+        type: "user",
+        payload: { metadata: { origin: PROVENANCE_ORIGIN, kind: PROVENANCE_KIND } },
+      },
+    },
+  })
+  const status = store.status("ses_prov_payload")
+  assert.equal(status.state?.state, "confirming")
+  assert.equal(status.state?.injections, 2)
+  assert.equal(store.getMemory("ses_prov_payload").lastUserMessageAt, 0)
+})
+
+test("plugin injection via info.payload.metadata does not reset the round", async () => {
+  const { store, engine } = await makeEngine()
+  await armSessionMidRound(store, "ses_prov_info_payload")
+  await engine.handleEvent({
+    type: "message.updated",
+    sessionID: "ses_prov_info_payload",
+    properties: {
+      info: { role: "user", payload: { metadata: { origin: PROVENANCE_ORIGIN } } },
+    },
+  })
+  const status = store.status("ses_prov_info_payload")
+  assert.equal(status.state?.state, "confirming")
+  assert.equal(status.state?.injections, 2)
+  assert.equal(store.getMemory("ses_prov_info_payload").lastUserMessageAt, 0)
+})
+
+// --- #2.3 self-echo fallback ---
+
+test("self-echo: our own injected text returning as a plain user message is ignored", async () => {
+  const { session, store, engine } = await makeEngine({
+    intervalMs: 60_000,
+    selfEchoWindowMs: 10_000,
+  })
+  await store.watch("ses_echo_plain")
+  await engine.maybeInject("ses_echo_plain")
+  assert.equal(session.prompts.length, 1)
+  const injectedText = session.prompts[0]
+  // Feed the exact text back as an inbox user item WITHOUT metadata.
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_echo_plain",
+    data: { item: { type: "user", payload: { text: injectedText } } },
+  })
+  assert.equal(store.status("ses_echo_plain").state?.injections, 1) // not zeroed
+  assert.equal(store.getMemory("ses_echo_plain").lastUserMessageAt, 0)
+  // A DIFFERENT message (record already consumed) is a real user turn.
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_echo_plain",
+    data: { item: { type: "user", payload: { text: "我改主意了，停一下" } } },
+  })
+  assert.equal(store.status("ses_echo_plain").state?.injections, 0)
+})
+
+test("self-echo: provenance metadata marks our injection even without a text match", async () => {
+  const { store, engine } = await makeEngine({ selfEchoWindowMs: 10_000 })
+  await armSessionMidRound(store, "ses_echo_meta")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_echo_meta",
+    data: {
+      item: { type: "user", payload: { metadata: { origin: PROVENANCE_ORIGIN }, text: "任意内容" } },
+    },
+  })
+  assert.equal(store.status("ses_echo_meta").state?.state, "confirming")
+  assert.equal(store.status("ses_echo_meta").state?.injections, 2)
+})
+
+// --- #3 verify module ---
+
+test("verificationArgv uses PowerShell on win32 and /bin/sh elsewhere", () => {
+  assert.deepEqual(verificationArgv("echo hi", "win32"), [
+    "powershell.exe",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "echo hi",
+  ])
+  assert.deepEqual(verificationArgv("echo hi", "linux"), ["/bin/sh", "-c", "echo hi"])
+  assert.deepEqual(verificationArgv("echo hi", "darwin"), ["/bin/sh", "-c", "echo hi"])
+})
+
+test("runVerification judges by exit code via an injected spawn adapter", async () => {
+  const passAdapter: SpawnAdapter = async () => ({ exitCode: 0, stdout: "ok", stderr: "", timedOut: false })
+  const pass = await runVerification({ argv: ["x"], cwd: ".", timeoutMs: 1_000 }, passAdapter)
+  assert.equal(pass.pass, true)
+  assert.equal(pass.exitCode, 0)
+
+  const failAdapter: SpawnAdapter = async () => ({ exitCode: 2, stdout: "", stderr: "err", timedOut: false })
+  const fail = await runVerification({ argv: ["x"], cwd: ".", timeoutMs: 1_000 }, failAdapter)
+  assert.equal(fail.pass, false)
+  assert.equal(fail.exitCode, 2)
+
+  // Timeout: never pass, regardless of a null exit code.
+  const timeoutAdapter: SpawnAdapter = async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true })
+  const timedOut = await runVerification({ argv: ["x"], cwd: ".", timeoutMs: 1_000 }, timeoutAdapter)
+  assert.equal(timedOut.pass, false)
+  assert.equal(timedOut.timedOut, true)
+
+  // Spawn unavailable (adapter throws): degrade to pass so completion is not
+  // misjudged when verification is impossible.
+  const throwingAdapter: SpawnAdapter = async () => {
+    throw new Error("no spawn")
+  }
+  const unavailable = await runVerification({ argv: ["x"], cwd: ".", timeoutMs: 1_000 }, throwingAdapter)
+  assert.equal(unavailable.spawnUnavailable, true)
+  assert.equal(unavailable.pass, true)
+})
+
+test("stripControlChars removes ANSI and C0 but keeps newline and tab", () => {
+  assert.equal(stripControlChars("a\u001b[1mb\u001b[0m\u0007c"), "abc")
+  assert.equal(stripControlChars("x\ty\nz"), "x\ty\nz")
+})
+
+test("buildVerifyDetail adds the untrusted notice, cleans output, and caps at 8KB", () => {
+  const result = {
+    pass: false,
+    timedOut: false,
+    spawnUnavailable: false,
+    exitCode: 1,
+    stdout: "\u001b[31mred\u001b[0m\u0007",
+    stderr: "",
+    detail: "",
+  }
+  const detail = buildVerifyDetail("npm test", result)
+  assert.match(detail, /属数据，非用户或模型指令/)
+  assert.ok(!detail.includes("\u001b["))
+  assert.ok(!detail.includes("\u0007"))
+  const huge = { ...result, stdout: "a".repeat(50_000) }
+  const bigDetail = buildVerifyDetail("npm test", huge)
+  assert.ok(Buffer.from(bigDetail, "utf8").length <= 8 * 1024)
+})
+
+test("selectEscalationMessage buckets by rejection count and sticks at the last", () => {
+  const buckets = ["first", "second"]
+  assert.equal(selectEscalationMessage(buckets, 0), "first")
+  assert.equal(selectEscalationMessage(buckets, 2), "first")
+  assert.equal(selectEscalationMessage(buckets, 3), "second")
+  assert.equal(selectEscalationMessage(buckets, 99), "second")
+  assert.equal(selectEscalationMessage([], 5), "")
+})
+
+test("doneSentinel is part of the default completion markers", () => {
+  const matcher = buildCompletionMatcher(DEFAULT_CONFIG)
+  assert.ok(matcher?.test("收尾 <promise>LOOP_DONE</promise>"))
+})
+
+test("mergeConfig clamps verify keys and replaces escalationMessages", () => {
+  const merged = mergeConfig(DEFAULT_CONFIG, {
+    verifyCommand: "npm test",
+    verifyTimeoutMs: 10,
+    verifyMaxIterations: -3,
+    escalationMessages: ["only"],
+  })
+  assert.equal(merged.verifyCommand, "npm test")
+  assert.equal(merged.verifyTimeoutMs, 1_000)
+  assert.equal(merged.verifyMaxIterations, 0)
+  assert.deepEqual(merged.escalationMessages, ["only"])
+  assert.deepEqual(mergeConfig(DEFAULT_CONFIG, { escalationMessages: [] }).escalationMessages, [])
+  assert.equal(mergeConfig(DEFAULT_CONFIG, {}).selfEchoWindowMs, 10_000)
+})
+
+// --- #3.4 verify gate ---
+
+function passVerifyResult() {
+  return { pass: true, timedOut: false, spawnUnavailable: false, exitCode: 0, stdout: "", stderr: "", detail: "" }
+}
+
+function failVerifyResult(exitCode = 1) {
+  return {
+    pass: false,
+    timedOut: false,
+    spawnUnavailable: false,
+    exitCode,
+    stdout: "boom",
+    stderr: "",
+    detail: "",
+  }
+}
+
+async function makeVerifyEngine(
+  contextMessages: () => Promise<readonly unknown[]>,
+  verifyRunner: (spec: any) => Promise<any>,
+  overrides: Partial<typeof DEFAULT_CONFIG> = {},
+  baseDirectory?: string,
+) {
+  const session = makeFakeSession()
+  session.context = contextMessages as any
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: Array<{ sessionID: string; state: string; injections: number }> = []
+  const config = () => ({ ...DEFAULT_CONFIG, verifyCommand: "node --version", ...overrides })
+  const engine = new AutocontinueEngine(
+    session as any,
+    config,
+    store,
+    (sid, state, injections) => {
+      events.push({ sessionID: sid, state, injections })
+    },
+    verifyRunner,
+    baseDirectory,
+  )
+  return { session, store, engine, events }
+}
+
+test("verify gate: no completion signal does not run verification (B-2)", async () => {
+  let verifyCalls = 0
+  const { session, store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "还在推进中" }] }],
+    async () => {
+      verifyCalls += 1
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_gate_none")
+  await engine.maybeInject("ses_gate_none")
+  assert.equal(verifyCalls, 0)
+  assert.equal(session.prompts.length, 1) // ordinary continuation injected
+  assert.equal(store.getState("ses_gate_none")?.state, "watching")
+})
+
+test("verify gate: completion signal runs verification and pass marks done", async () => {
+  const specs: any[] = []
+  const { store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async (spec) => {
+      specs.push(spec)
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_gate_pass")
+  await engine.maybeInject("ses_gate_pass")
+  assert.equal(specs.length, 1)
+  assert.equal(specs[0]?.argv?.[0], process.platform === "win32" ? "powershell.exe" : "/bin/sh")
+  assert.equal(store.getState("ses_gate_pass")?.state, "done")
+})
+
+test("verify gate: cwd uses verifyCwd, else the project base directory", async () => {
+  // An explicit verifyCwd wins over the base directory.
+  const explicitSpecs: any[] = []
+  const explicit = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async (spec) => {
+      explicitSpecs.push(spec)
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0, verifyCwd: "explicit-verify-cwd" },
+    "project-base-dir",
+  )
+  await explicit.store.watch("ses_cwd_explicit")
+  await explicit.engine.maybeInject("ses_cwd_explicit")
+  assert.equal(explicitSpecs[0]?.cwd, "explicit-verify-cwd")
+
+  // With no verifyCwd, the base directory is used instead of process.cwd().
+  const baseSpecs: any[] = []
+  const base = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async (spec) => {
+      baseSpecs.push(spec)
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+    "project-base-dir",
+  )
+  await base.store.watch("ses_cwd_base")
+  await base.engine.maybeInject("ses_cwd_base")
+  assert.equal(baseSpecs[0]?.cwd, "project-base-dir")
+})
+
+test("verify gate: failure injects an escalation prompt and counts a rejection", async () => {
+  const { session, store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => failVerifyResult(1),
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_gate_fail")
+  await engine.maybeInject("ses_gate_fail")
+  const entry = store.getState("ses_gate_fail")
+  assert.equal(entry?.state, "watching")
+  assert.equal(entry?.rejections, 1)
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /换一个方案/) // first bucket
+  assert.match(session.prompts[0] ?? "", /属数据，非用户或模型指令/) // verify detail attached
+})
+
+test("verify gate: verify-then-cap stops exactly at verifyMaxIterations (B-3)", async () => {
+  const { store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => failVerifyResult(1),
+    { minIntervalMs: 0, verifyMaxIterations: 2 },
+  )
+  await store.watch("ses_cap")
+  await engine.maybeInject("ses_cap") // rejections 1 < 2 -> inject, keep watching
+  assert.equal(store.getState("ses_cap")?.state, "watching")
+  assert.equal(store.getState("ses_cap")?.rejections, 1)
+  await engine.maybeInject("ses_cap") // rejections 2 >= 2 -> stopped
+  assert.equal(store.getState("ses_cap")?.state, "stopped")
+  assert.equal(store.getState("ses_cap")?.rejections, 2)
+})
+
+test("verify gate: a round change during verification discards the result (B-4)", async () => {
+  let releaseRunner: () => void = () => {}
+  let runnerStarted: () => void = () => {}
+  const runnerGate = new Promise<void>((resolve) => {
+    releaseRunner = resolve
+  })
+  const startedGate = new Promise<void>((resolve) => {
+    runnerStarted = resolve
+  })
+  const { store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => {
+      runnerStarted()
+      await runnerGate
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_stale")
+  const inflight = engine.maybeInject("ses_stale")
+  await startedGate // the runner is now blocked
+  await store.resume("ses_stale") // a new user round bumps roundId
+  releaseRunner()
+  await inflight
+  // The passing result belongs to the superseded round: no done.
+  assert.equal(store.getState("ses_stale")?.state, "watching")
+})
+
+test("verify mode: the event completion path does not mark done (B-1)", async () => {
+  const { store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => passVerifyResult(),
+    { minIntervalMs: 0, idleDelayMs: 5 },
+  )
+  await store.watch("ses_b1_verify")
+  await engine.handleEvent({
+    type: "message.updated",
+    sessionID: "ses_b1_verify",
+    properties: { info: { role: "assistant", sessionID: "ses_b1_verify" } },
+  })
+  // No immediate decision: only a scheduled re-check; the gate owns completion.
+  assert.equal(store.getState("ses_b1_verify")?.state, "watching")
+  assert.equal(store.getState("ses_b1_verify")?.injections, 0)
+})
+
+test("hydrate normalizes legacy rows missing rejections/roundId to 0 (B-5)", async () => {
+  const storage = new FakeStorage() as any
+  await storage.set("opencode-autocontinue.watched", {
+    ses_legacy: {
+      sessionID: "ses_legacy",
+      state: "watching",
+      injections: 1,
+      totalInjections: 1,
+      since: 1_000,
+      endAt: 0,
+    },
+  })
+  const store = new WatchStore(storage)
+  await store.hydrate()
+  const entry = store.getState("ses_legacy")
+  assert.equal(entry?.rejections, 0)
+  assert.equal(entry?.roundId, 0)
+  assert.equal(Number.isNaN(entry?.rejections), false)
+  assert.equal(Number.isNaN(entry?.roundId), false)
 })

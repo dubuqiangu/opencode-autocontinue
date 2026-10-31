@@ -5,7 +5,7 @@ V2 服务端 + TUI 插件：自动续跑"总任务未完成就被中断"的会�
 > ⚠️ **本文档已迁移到 `docs/`**，以下仅为入口摘要。完整内容见：
 >
 > - 总入口：[docs/README.md](docs/README.md)（文档地图 + 快速链接）
-> - 架构：`docs/architecture/overview.md` / `events-and-state.md` / `module-layout.md` / `runtime-lessons.md`
+> - 架构：`docs/architecture/overview.md` / `events-and-state.md` / `module-layout.md` / `runtime-lessons.md` / `provenance-and-loop.md`（注入溯源 + 验证驱动续跑设计稿）
 > - 功能：`docs/features/commands.md` / `footer.md` / `engine.md` / `config.md`
 > - 决策：`docs/decisions/known-issues.md` / `roadmap.md` / `changelog.md`
 

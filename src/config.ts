@@ -44,6 +44,20 @@ export interface PluginConfig {
    *  sessions get the unified `message` injected while idle (skipped while the
    *  model is busy, when done/stopped, or while a check is in flight). */
   intervalMs: number
+  /** Verification command for verify-driven completion. Empty = Loop disabled. */
+  verifyCommand: string
+  /** Per-run verification timeout (ms); clamped to >= 1000. */
+  verifyTimeoutMs: number
+  /** Max failing verification rounds before stopping (0 = unlimited). */
+  verifyMaxIterations: number
+  /** Verification working directory. Empty = the session/project directory. */
+  verifyCwd: string
+  /** Self-echo window (ms): an inbound user message equal to our last injected
+   *  text within this window is treated as our own echo, not a real user turn. */
+  selfEchoWindowMs: number
+  /** Escalating continuation prompts picked by failure bucket. Empty = fall back
+   *  to `message`. */
+  escalationMessages: string[]
 }
 
 export const DEFAULT_CONFIG: PluginConfig = {
@@ -56,7 +70,13 @@ export const DEFAULT_CONFIG: PluginConfig = {
   minIntervalMs: 30_000,
   maxConsecutive: 20,
   watchTimeoutMs: 0,
-  completionMarkers: ["[任务完成]", "[夜间任务完成]", "[task done]", "<promise>DONE</promise>"],
+  completionMarkers: [
+    "[任务完成]",
+    "[夜间任务完成]",
+    "[task done]",
+    "<promise>DONE</promise>",
+    "<promise>LOOP_DONE</promise>",
+  ],
   markerRegex: "",
   finalCheckEnabled: true,
   finalCheckMessage:
@@ -77,6 +97,15 @@ export const DEFAULT_CONFIG: PluginConfig = {
   excludeTitleKeywords: ["测试"],
   userGraceMs: 15_000,
   intervalMs: 3_600_000,
+  verifyCommand: "",
+  verifyTimeoutMs: 120_000,
+  verifyMaxIterations: 0,
+  verifyCwd: "",
+  selfEchoWindowMs: 10_000,
+  escalationMessages: [
+    "稳步推进既定计划，避免重复劳动；若当前方案反复不通过，换一个方案，不要在同一处打转。",
+    "用 `git log` / `git diff` 核对已改动，重新审视根因——你可能在解错的问题；必要时回到最初需求确认验收标准。",
+  ],
 }
 
 /** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
@@ -182,6 +211,24 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   // documented "0 = disabled" escape hatch is actually reachable via config.
   if (typeof overrides.intervalMs === "number") {
     merged.intervalMs = overrides.intervalMs <= 0 ? 0 : Math.max(1_000, overrides.intervalMs)
+  }
+  if (typeof overrides.verifyCommand === "string") merged.verifyCommand = overrides.verifyCommand
+  if (typeof overrides.verifyTimeoutMs === "number") {
+    merged.verifyTimeoutMs = Math.max(1_000, overrides.verifyTimeoutMs)
+  }
+  if (typeof overrides.verifyMaxIterations === "number") {
+    merged.verifyMaxIterations = Math.max(0, overrides.verifyMaxIterations)
+  }
+  if (typeof overrides.verifyCwd === "string") merged.verifyCwd = overrides.verifyCwd
+  if (typeof overrides.selfEchoWindowMs === "number") {
+    merged.selfEchoWindowMs = Math.max(0, overrides.selfEchoWindowMs)
+  }
+  // A provided array replaces the default (never concatenated); an explicit
+  // empty array is honored so `escalationMessages: []` falls back to `message`.
+  if (Array.isArray(overrides.escalationMessages)) {
+    merged.escalationMessages = overrides.escalationMessages.filter(
+      (prompt): prompt is string => typeof prompt === "string",
+    )
   }
   return merged
 }

@@ -103,6 +103,13 @@ export interface WatchState {
   lastInjectedAt?: number
   /** End of the current watch window (epoch ms). 0 = no window. Set at watch/resume time. */
   endAt?: number
+  /** Failing verification rounds in the current round (verify-driven loop).
+   *  INTERNAL: not exposed via status()/list() (avoids RPC schema churn). */
+  rejections: number
+  /** Monotonic round identifier. Bumped by resume(); initialized by watch().
+   *  Used to discard a verification result that belongs to a superseded round.
+   *  INTERNAL: not exposed via status()/list(). */
+  roundId: number
   state: "watching" | "confirming" | "stopped" | "done"
 }
 

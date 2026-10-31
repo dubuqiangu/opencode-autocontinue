@@ -17,8 +17,8 @@
 
 import type { PluginConfig } from "./config.ts"
 import { buildCompletionMatcher } from "./config.ts"
-import type { WatchStore } from "./state.ts"
-import { injectContinuation } from "./prompt.ts"
+import type { WatchStore, InMemoryState } from "./state.ts"
+import { injectContinuation, isPluginInjection } from "./prompt.ts"
 import {
   hasCompletionMarker,
   isRetryableError,
@@ -30,9 +30,22 @@ import {
   titleExcluded,
 } from "./events.ts"
 import type { WatchState } from "./rpc.ts"
+import { buildVerifyDetail, runVerification, verificationArgv } from "./verify.ts"
+import type { SpawnSpec, VerifyResult } from "./verify.ts"
 
 export interface SessionLike {
-  prompt(input: { sessionID: string; text: string }): Promise<unknown>
+  prompt(input: {
+    sessionID: string
+    text: string
+    metadata?: Record<string, unknown>
+  }): Promise<unknown>
+  synthetic?(input: {
+    sessionID: string
+    text: string
+    description?: string
+    metadata?: Record<string, unknown>
+    resume?: boolean
+  }): Promise<unknown>
   hook(name: string, callback: (event: any) => void | Promise<void>): Promise<unknown>
   context(input: { sessionID: string }): Promise<readonly unknown[]>
   get(input: { sessionID: string }): Promise<unknown>
@@ -108,6 +121,16 @@ export function retryHookHandler(
   _event.decision = { retry: true, delay }
 }
 
+/** Pick the escalation prompt bucket for the current failure count.
+ *  `index = min(len - 1, floor(rejections / 3))` — the first bucket covers the
+ *  first three failures, then it steps up; the last bucket sticks. An empty
+ *  list returns "" so the caller can fall back to `message`. */
+export function selectEscalationMessage(messages: string[], rejections: number): string {
+  if (messages.length === 0) return ""
+  const index = Math.min(messages.length - 1, Math.floor(Math.max(0, rejections) / 3))
+  return messages[index] ?? ""
+}
+
 export class AutocontinueEngine {
   private readonly session: SessionLike
   private readonly config: () => PluginConfig
@@ -129,6 +152,16 @@ export class AutocontinueEngine {
    *  completion marker only counts in a message produced AFTER this point —
    *  the old marker message must not re-trigger done (B1 guard). */
   private confirmingAtAssistantCount = new Map<string, number>()
+  /** In-flight verification AbortControllers (per session), so off / dispose /
+   *  session.deleted can cancel a running command. */
+  private readonly activeVerifyControllers = new Map<string, AbortController>()
+  /** Verification runner seam: production runs the real command, tests inject a
+   *  fake so the gate can be exercised without spawning a process. */
+  private readonly verifyRunner: (spec: SpawnSpec) => Promise<VerifyResult>
+  /** Project directory used as the default verification cwd when `verifyCwd`
+   *  is empty. The host server process cwd is not necessarily the project, so
+   *  a running command must default here instead of to process.cwd(). */
+  private readonly baseDirectory: string | undefined
 
   constructor(
     session: SessionLike,
@@ -140,11 +173,15 @@ export class AutocontinueEngine {
       injections: number,
       totalInjections: number,
     ) => void,
+    verifyRunner?: (spec: SpawnSpec) => Promise<VerifyResult>,
+    baseDirectory?: string,
   ) {
     this.session = session
     this.config = config
     this.store = store
     this.emitChanged = emitChanged
+    this.verifyRunner = verifyRunner ?? ((spec) => runVerification(spec))
+    this.baseDirectory = baseDirectory
   }
 
   /** Register the retry hook. */
@@ -213,6 +250,126 @@ export class AutocontinueEngine {
         this.scheduleInterval(status.sessionID)
       }
     }
+  }
+
+  /** Abort a still-running verification command (off / dispose / session.deleted
+   *  / a new real user round). Idempotent. */
+  abortVerify(sessionID: string): void {
+    const controller = this.activeVerifyControllers.get(sessionID)
+    if (!controller) return
+    controller.abort()
+    this.activeVerifyControllers.delete(sessionID)
+  }
+
+  /** Inject a continuation and arm the self-echo guard with the rendered text. */
+  private async injectAndRecord(
+    memory: InMemoryState,
+    sessionID: string,
+    template: string,
+    endAt: number,
+  ): Promise<string> {
+    const text = await injectContinuation(this.session, sessionID, template, endAt)
+    memory.lastSelfInjection = { text, at: Date.now() }
+    return text
+  }
+
+  /** Whether an inbound "user" message is actually our own injection returning.
+   *  Metadata provenance is authoritative; the self-echo record is the
+   *  host-agnostic fallback for hosts that do not round-trip metadata. */
+  private isSelfEcho(
+    memory: InMemoryState,
+    metadata: unknown,
+    inboundText: string | undefined,
+  ): boolean {
+    if (isPluginInjection(metadata)) return true
+    const record = memory.lastSelfInjection
+    if (!record) return false
+    if (Date.now() - record.at > this.config().selfEchoWindowMs) return false
+    // Require exact text equality: without extractable text we never swallow a
+    // message that might be a real user turn.
+    if (inboundText === undefined || inboundText === "") return false
+    return inboundText === record.text
+  }
+
+  /** Verify-driven completion gate (Loop mode), reached only when
+   *  `verifyCommand` is configured. Completion is judged solely by an
+   *  independent command's exit code, not the model's self-report. */
+  private async runVerifyGate(
+    sessionID: string,
+    entry: WatchState,
+    latest: { text: string; parts: unknown },
+    hasSignal: boolean,
+    memory: InMemoryState,
+  ): Promise<void> {
+    const cfg = this.config()
+    // B-2 (gating): with no completion signal, verification must NOT run — a
+    // clean-tree `npm test` would otherwise judge an idle round as done. Fall
+    // back to the ordinary continuation behaviour.
+    if (!hasSignal) {
+      if (looksIncomplete(latest.text, latest.parts)) return
+      if (this.disposed) return
+      const freshEntry = this.store.getState(sessionID)
+      if (!freshEntry || (freshEntry.state !== "watching" && freshEntry.state !== "confirming")) return
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
+      await this.injectAndRecord(memory, sessionID, cfg.message, freshEntry.endAt ?? 0)
+      await this.store.recordInjection(sessionID)
+      void this.emitChangedInternal(sessionID, "watching")
+      return
+    }
+
+    // B-4: capture the round identity BEFORE awaiting the command.
+    const roundBefore = entry.roundId
+    const controller = new AbortController()
+    memory.activeVerifyAbort = controller
+    this.activeVerifyControllers.set(sessionID, controller)
+    let outcome: VerifyResult
+    try {
+      outcome = await this.verifyRunner({
+        argv: verificationArgv(cfg.verifyCommand, process.platform),
+        cwd: cfg.verifyCwd || this.baseDirectory || process.cwd(),
+        timeoutMs: cfg.verifyTimeoutMs,
+        signal: controller.signal,
+      })
+    } finally {
+      this.activeVerifyControllers.delete(sessionID)
+      if (memory.activeVerifyAbort === controller) memory.activeVerifyAbort = undefined
+    }
+
+    // B-4 (staleness): the session may have been unwatched / done / stopped /
+    // resumed into a new round / disposed, or the window may have closed while
+    // the command ran. Discard the stale result — no inject, no done.
+    if (this.disposed) return
+    const after = this.store.getState(sessionID)
+    if (!after || (after.state !== "watching" && after.state !== "confirming")) return
+    if (after.roundId !== roundBefore) return
+    if (after.endAt && Date.now() >= after.endAt) return
+    if (cfg.watchTimeoutMs > 0 && Date.now() - after.since >= cfg.watchTimeoutMs) return
+
+    if (outcome.pass) {
+      await this.store.markDone(sessionID)
+      this.clearTimer(sessionID)
+      this.stopInterval(sessionID)
+      void this.emitChangedInternal(sessionID, "done")
+      return
+    }
+
+    // B-3: verify-then-cap. Count the failure first, THEN apply the cap, so the
+    // final failing round is judged stopped instead of silently continuing.
+    await this.store.recordRejection(sessionID)
+    const rejections = this.store.getState(sessionID)?.rejections ?? 0
+    if (cfg.verifyMaxIterations > 0 && rejections >= cfg.verifyMaxIterations) {
+      await this.store.markStopped(sessionID)
+      this.clearTimer(sessionID)
+      this.stopInterval(sessionID)
+      void this.emitChangedInternal(sessionID, "stopped")
+      return
+    }
+
+    const escalation = selectEscalationMessage(cfg.escalationMessages, rejections) || cfg.message
+    const detail = buildVerifyDetail(cfg.verifyCommand, outcome)
+    await this.injectAndRecord(memory, sessionID, `${escalation}\n\n${detail}`, after.endAt ?? 0)
+    await this.store.recordInjection(sessionID)
+    void this.emitChangedInternal(sessionID, "watching")
   }
 
   /** Unified injection decision reached by every trigger source. Single-flight
@@ -304,6 +461,13 @@ export class AutocontinueEngine {
       // trigger re-checks once the subagent finishes.
       if (latest.backgroundWorkRunning) return
 
+      // Verify mode replaces the marker / final-check flow entirely: the
+      // outcome is judged only by the configured command (see runVerifyGate).
+      if (cfg.verifyCommand) {
+        await this.runVerifyGate(sessionID, entry, latest, hasMarker, memory)
+        return
+      }
+
       // While confirming (whole-project review round in flight), a second
       // completion marker only counts if it appears in a NEW assistant message
       // produced after the finalCheckMessage injection. Until the model
@@ -339,7 +503,7 @@ export class AutocontinueEngine {
         await this.store.beginConfirming(sessionID)
         this.clearTimer(sessionID)
         void this.emitChangedInternal(sessionID, "confirming")
-        await injectContinuation(this.session, sessionID, cfg.finalCheckMessage, entry.endAt ?? 0)
+        await this.injectAndRecord(memory, sessionID, cfg.finalCheckMessage, entry.endAt ?? 0)
         await this.store.recordInjection(sessionID)
         void this.emitChangedInternal(sessionID, "confirming")
         return
@@ -363,7 +527,7 @@ export class AutocontinueEngine {
       if (!freshEntry || (freshEntry.state !== "watching" && freshEntry.state !== "confirming")) return
       if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
 
-      await injectContinuation(this.session, sessionID, cfg.message, freshEntry.endAt ?? 0)
+      await this.injectAndRecord(memory, sessionID, cfg.message, freshEntry.endAt ?? 0)
       await this.store.recordInjection(sessionID)
       void this.emitChangedInternal(sessionID, "watching")
     } catch (error) {
@@ -408,7 +572,10 @@ export class AutocontinueEngine {
         // failed. A running subagent has no state (or state === "running").
         if (type === "synthetic") {
           const metadata = (message as { metadata?: { source?: string; state?: string } }).metadata
-          if (metadata?.source === "subagent") {
+          // Our own continuation injections also arrive as "synthetic" on hosts
+          // that support the channel; exclude them explicitly so a future
+          // metadata drift can never read our injection as background work.
+          if (!isPluginInjection(metadata) && metadata?.source === "subagent") {
             const subagentState = metadata.state
             const terminal =
               subagentState === "completed" ||
@@ -543,9 +710,33 @@ export class AutocontinueEngine {
         // V1: info is nested (properties.info) or flat. V2: the inbox item
         // carries the user/synthetic/compaction distinction on data.item.
         const info = event.properties?.info ?? event.info
-        const inboxItem = event.data?.item as { type?: string } | undefined
+        const inboxItem = event.data?.item as
+          | {
+              type?: string
+              metadata?: unknown
+              payload?: { metadata?: unknown; text?: unknown }
+            }
+          | undefined
+        // The installed host nests provenance under item.payload.metadata and the
+        // text under item.payload.text; read both defensively so the current
+        // shape and the prompt() fallback stay covered.
+        const itemMetadata =
+          inboxItem?.payload?.metadata ??
+          inboxItem?.metadata ??
+          (info as { metadata?: unknown } | undefined)?.metadata
+        const itemText =
+          typeof inboxItem?.payload?.text === "string" ? inboxItem.payload.text : undefined
+        // Only a REAL user message resets the round. Our own injected
+        // continuation ("继续执行") also lands as type "user" on hosts without
+        // the synthetic channel, so it must never zero the injection counter.
         if (inboxItem?.type === "user") {
+          if (this.isSelfEcho(memory, itemMetadata, itemText)) {
+            memory.lastSelfInjection = undefined
+            break
+          }
           memory.lastUserMessageAt = Date.now()
+          // A real user turn supersedes any in-flight verification round.
+          this.abortVerify(sessionID)
           await this.store.resume(sessionID, true)
           this.confirmingAtAssistantCount.delete(sessionID)
           this.scheduleInterval(sessionID)
@@ -555,7 +746,22 @@ export class AutocontinueEngine {
         if (!info || typeof info !== "object") break
         const role = (info as { role?: string }).role
         if (role === "user") {
+          // Same provenance/self-echo guard for the V1/prompt-fallback info
+          // shape; metadata may ride on info.payload.metadata and the text on
+          // the info parts.
+          const infoMetadata =
+            (info as { payload?: { metadata?: unknown } }).payload?.metadata ??
+            (info as { metadata?: unknown }).metadata
+          const infoText =
+            messageText((info as { parts?: unknown }).parts) ||
+            messageText((info as { content?: unknown }).content) ||
+            undefined
+          if (this.isSelfEcho(memory, infoMetadata, infoText)) {
+            memory.lastSelfInjection = undefined
+            break
+          }
           memory.lastUserMessageAt = Date.now()
+          this.abortVerify(sessionID)
           await this.store.resume(sessionID, true)
           this.confirmingAtAssistantCount.delete(sessionID)
           this.scheduleInterval(sessionID)
@@ -591,6 +797,14 @@ export class AutocontinueEngine {
             // User's guard: a running background subagent means the overall task
             // is not done — skip completion decisions until it settles.
             if (latest.backgroundWorkRunning) break
+            // B-1: in verify mode the event path must NOT decide completion
+            // (markDone / beginConfirming / finalCheck injection). A detected
+            // signal only schedules a maybeInject; the verify gate there owns
+            // the decision.
+            if (cfg.verifyCommand) {
+              if (hasMarker) this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 1_000))
+              break
+            }
             if (current?.state === "confirming") {
               // Same B1/B2 guards as maybeInject: a second marker only counts
               // in a NEW assistant message; a non-marker review reply returns
@@ -613,7 +827,7 @@ export class AutocontinueEngine {
               await this.store.beginConfirming(sessionID)
               this.clearTimer(sessionID)
               void this.emitChangedInternal(sessionID, "confirming")
-              await injectContinuation(this.session, sessionID, cfg.finalCheckMessage, current?.endAt ?? 0)
+              await this.injectAndRecord(memory, sessionID, cfg.finalCheckMessage, current?.endAt ?? 0)
               await this.store.recordInjection(sessionID)
               void this.emitChangedInternal(sessionID, "confirming")
             } else if (hasMarker) {
@@ -629,6 +843,7 @@ export class AutocontinueEngine {
         break
       }
       case "session.deleted": {
+        this.abortVerify(sessionID)
         this.store.unwatch(sessionID).catch(() => {})
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -642,6 +857,8 @@ export class AutocontinueEngine {
 
   dispose(): void {
     this.disposed = true
+    for (const controller of this.activeVerifyControllers.values()) controller.abort()
+    this.activeVerifyControllers.clear()
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
     for (const timer of this.intervalTimers.values()) clearInterval(timer)

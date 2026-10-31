@@ -17,7 +17,20 @@ interface ServerContext {
     set(key: string, value: unknown): Promise<void>
   }
   session: {
-    prompt(input: { sessionID: string; text: string }): Promise<unknown>
+    prompt(input: {
+      sessionID: string
+      text: string
+      metadata?: Record<string, unknown>
+    }): Promise<unknown>
+    // Optional: hosts that support it land the injection as "synthetic";
+    // older hosts fall back to prompt (still tagged with provenance metadata).
+    synthetic?(input: {
+      sessionID: string
+      text: string
+      description?: string
+      metadata?: Record<string, unknown>
+      resume?: boolean
+    }): Promise<unknown>
     hook(name: string, callback: (event: any) => void | Promise<void>): Promise<unknown>
     context(input: { sessionID: string }): Promise<readonly unknown[]>
     get(input: { sessionID: string }): Promise<unknown>
@@ -60,9 +73,16 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   // impl without synchronously invoking a method. Constructing first removes
   // the latent ReferenceError hazard. emitStateChanged is captured by
   // reference (let), so its later reassignment to the RPC emitter is visible.
-  const engine = new AutocontinueEngine(ctx.session, config, store, (sessionID, state, injections, totalInjections) => {
-    void emitStateChanged(sessionID, state, injections, totalInjections)
-  })
+  const engine = new AutocontinueEngine(
+    ctx.session,
+    config,
+    store,
+    (sessionID, state, injections, totalInjections) => {
+      void emitStateChanged(sessionID, state, injections, totalInjections)
+    },
+    undefined,
+    ctx.location?.directory,
+  )
 
   const rpcImplementation = {
     async set(input: { sessionID: string; enabled: boolean }) {
@@ -70,6 +90,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
         await store.watch(input.sessionID, config().endTime ? computeEndAt(config().endTime, config().startTime) : 0)
         engine.scheduleInterval(input.sessionID)
       } else {
+        // B-4: abort a running verification BEFORE unwatch() deletes the memory
+        // entry (the abort controller reference lives there).
+        engine.abortVerify(input.sessionID)
         await store.unwatch(input.sessionID)
         engine.stopInterval(input.sessionID)
         // P2-3: cancel any pending injection timeout so it cannot fire after

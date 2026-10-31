@@ -26,6 +26,12 @@
 
 - E1 推送前脱敏扫描 → E2 发布 → E3 `plugin update` 验证 GitHub HEAD
 
+## 机理移植（参考 `MichengAI/dsh-pua`）
+
+设计稿：[docs/architecture/provenance-and-loop.md](../architecture/provenance-and-loop.md)。
+按价值排序实施：① 注入溯源（修真实 bug）→ ② 验证驱动续跑 Loop → ③ 升级式提示 + 终止哨兵。
+不移植 dsh-pua 的宿主专属机制（两事件 surface-replace / 状态折叠 / integrity guard / i18n）。
+
 ## 未来方向（已评估，未实现）
 
 | 方向 | 说明 |
@@ -33,3 +39,4 @@
 | 全局默认值守 | 需配置项 `defaultEnabled` 之类，当前只做每会话手动开关 |
 | 值守会话列表 UI | 右栏/面板展示所有值守会话状态 |
 | 更细的完成判定 | AI 辅助判断任务完成（当前刻意不做，零模型成本） |
+| 失败观测计数器 | dsh-pua 的 `rejections` 分级（≥3 换根因 / ≥5 换方案），随 F2 落一半 |
