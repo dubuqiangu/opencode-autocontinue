@@ -34,10 +34,10 @@
 
 - **每会话独立状态**：TUI 维护 `Record<sessionID, status>` 的每会话状态表，不是单个全局信号——多会话同时值守互不覆盖（A 的标记不会因开启 B 而消失）
 - **动态读走 createMemo**：footer/sidebar 的渲染文本全部在 `createMemo` 内计算，信号变化即时触发 JSX 重渲染（无需切 session 才刷新；对应 usage-meter v0.7.8 修复的同款问题）
-- 订阅 RPC 事件 `autocontinue.state.changed`，状态变化更新对应会话的表项；事件携带 `rejections`/`verifying`，随状态实时写回（v0.5.0）
+- 订阅 RPC 事件 `autocontinue.state.changed`，状态变化更新对应会话的表项；事件携带 `rejections`/`verifying`/`toolFailureCount`，随状态实时写回（v0.5.0/v0.5.1）
 - 会话 ID 来源：`slotProps.sessionID`（JSX 函数组件收到的是 props 包装对象，须先解包再读——v0.3.6 前直接读包装层导致 `lastSlotSessionID` 永不缓存，`/autocontinue` 报「No current session」），回退 `lastSlotSessionID`（slot 缓存）→ `context.ui.router.current().params.sessionID`
 
 ## 配套反馈
 
 - 开启/关闭/续跑注入/停止/出错时 toast 提示（全英文）
-- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N resumes` 或 `Not watching`
+- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N injection(s)` 或 `Not watching`

@@ -32,6 +32,7 @@
 
 - **第一轮（v0.4.0）**：① 注入溯源（修真实 bug）→ ② 验证驱动续跑 Loop（opt-in）→ ③ 升级式提示 + ④ 终止哨兵 `LOOP_DONE`。
 - **第二轮（v0.5.0，§7）**：① 验证输出采集上限（修真实缺陷）→ ② abort/pause 哨兵 + `paused` 状态 → ③ 升级提示阈值化 + 轮次压力梯 → ④ 验证状态进 TUI/RPC → ⑤ 工具失败观测计数器（opt-in）→ B graceMs + 范围钳制。
+- **第三轮（v0.5.1，§8）**：全项目审查修复——跨午夜起点闸（`startGateClosed`）、验证前 TOCTOU 快照复检、非有限数值拒绝、字符串感知 JSONC 尾逗号、`state.changed` 携带 `toolFailureCount`、V1 工具结果观测、abort 哨兵优先于后台守卫、verify grace 定时器清理 + 增量 UTF-8 解码、死代码删除（`resetInjectionCount`）+ 补测。
 - **主动不移植**：两事件 surface-replace、tool-order 自愈、延后写重试、integrity guard、i18n、挫败感触发、feedback 循环、subagent 继承、clear/compact 特判（宿主专属或用途不符）；v0.5.0 另否决「删 V1 兼容死路径」（测试 + changelog 已锁定为有意兼容）。
 
 ## 未来方向（已评估，未实现）

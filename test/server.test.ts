@@ -140,6 +140,7 @@ import {
   AutocontinueEngine,
   computeEndAt,
   startTimeNotReached,
+  startGateClosed,
   retryHookHandler,
   selectPressureMessage,
   composeRejectionPrompt,
@@ -1907,4 +1908,415 @@ test("engine observes the last tool failure only when observeToolFailures is ena
   await enabled.store.watch("ses_tool_enabled")
   await enabled.engine.maybeInject("ses_tool_enabled")
   assert.equal(enabled.store.status("ses_tool_enabled").state?.toolFailureCount, 1)
+})
+
+// --- §8.3 full-project review fixes (v0.5.1) ---
+
+/** Freeze the process clock at `epochMs` while `run` executes so the
+ *  time-window gates can be tested deterministically. Restores the real Date
+ *  afterwards; top-level node:test tests run sequentially, so the override
+ *  cannot leak into a concurrent test. */
+async function withFrozenClock(epochMs: number, run: () => void | Promise<void>): Promise<void> {
+  const RealDate = Date
+  class FrozenDate extends RealDate {
+    constructor(...args: any[]) {
+      if (args.length === 0) super(epochMs)
+      else super(...args)
+    }
+    static now(): number {
+      return epochMs
+    }
+  }
+  ;(globalThis as any).Date = FrozenDate
+  try {
+    await run()
+  } finally {
+    ;(globalThis as any).Date = RealDate
+  }
+}
+
+/** Local epoch ms for today at HH:MM. */
+function todayAt(hours: number, minutes: number): number {
+  const at = new Date()
+  at.setHours(hours, minutes, 0, 0)
+  return at.getTime()
+}
+
+// F1: cross-midnight-aware start gate.
+
+test("startGateClosed: non-cross-midnight window closes before startTime", async () => {
+  await withFrozenClock(todayAt(7, 0), () => {
+    assert.equal(startGateClosed("09:00", "17:00"), true) // before start
+  })
+  await withFrozenClock(todayAt(10, 0), () => {
+    assert.equal(startGateClosed("09:00", "17:00"), false) // window open
+  })
+  await withFrozenClock(todayAt(18, 0), () => {
+    assert.equal(startGateClosed("09:00", "17:00"), false) // mirrors startTimeNotReached
+  })
+  assert.equal(startGateClosed("", "08:30"), false) // empty start = always open
+})
+
+test("startGateClosed: cross-midnight tail is open, pre-start gap is closed", async () => {
+  // 22:00 -> 08:30: at 03:00 (before startTime but before endTime) the window
+  // is STILL OPEN; at 09:00 (before startTime but past endTime) it is closed.
+  await withFrozenClock(todayAt(3, 0), () => {
+    assert.equal(startGateClosed("22:00", "08:30"), false)
+  })
+  await withFrozenClock(todayAt(9, 0), () => {
+    assert.equal(startGateClosed("22:00", "08:30"), true)
+  })
+  await withFrozenClock(todayAt(23, 0), () => {
+    assert.equal(startGateClosed("22:00", "08:30"), false)
+  })
+})
+
+test("F1: a cross-midnight window still injects at a post-midnight clock", async () => {
+  await withFrozenClock(todayAt(3, 0), async () => {
+    const { session, store, engine } = await makeEngine({
+      intervalMs: 60_000,
+      idleDelayMs: 5,
+      startTime: "22:00",
+      endTime: "08:30",
+    })
+    await store.watch("ses_cross_midnight")
+    await engine.maybeInject("ses_cross_midnight")
+    assert.equal(session.prompts.length, 1)
+    assert.equal(store.getState("ses_cross_midnight")?.state, "watching")
+  })
+})
+
+// F2: verify-gate pre-command TOCTOU.
+
+test("F2: a real user message during the pre-command awaits suppresses verification", async () => {
+  let releaseContext: () => void = () => {}
+  let contextStarted: () => void = () => {}
+  const contextGate = new Promise<void>((resolve) => {
+    releaseContext = resolve
+  })
+  const startedGate = new Promise<void>((resolve) => {
+    contextStarted = resolve
+  })
+  let firstCall = true
+  let verifyCalls = 0
+  const messages = [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] },
+  ]
+  const { session, store, engine } = await makeVerifyEngine(
+    async () => {
+      if (firstCall) {
+        firstCall = false
+        contextStarted()
+        await contextGate
+      }
+      return messages as any
+    },
+    async () => {
+      verifyCalls += 1
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0, userGraceMs: 60_000 },
+  )
+  await store.watch("ses_f2_pre")
+  const inflight = engine.maybeInject("ses_f2_pre")
+  await startedGate
+  // A real user message lands while maybeInject is still awaiting the context,
+  // i.e. BEFORE runVerifyGate captures its round snapshot.
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_f2_pre",
+    data: { item: { type: "user" } },
+  })
+  releaseContext()
+  await inflight
+  assert.equal(verifyCalls, 0)
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_f2_pre")?.state, "watching")
+})
+
+test("F2: a real user message during the command discards the result", async () => {
+  let releaseRunner: () => void = () => {}
+  let runnerStarted: () => void = () => {}
+  const runnerGate = new Promise<void>((resolve) => {
+    releaseRunner = resolve
+  })
+  const startedGate = new Promise<void>((resolve) => {
+    runnerStarted = resolve
+  })
+  const { session, store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => {
+      runnerStarted()
+      await runnerGate
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0, userGraceMs: 0 },
+  )
+  await store.watch("ses_f2_flight")
+  const inflight = engine.maybeInject("ses_f2_flight")
+  await startedGate
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_f2_flight",
+    data: { item: { type: "user" } },
+  })
+  releaseRunner()
+  await inflight
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_f2_flight")?.state, "watching")
+  assert.equal(store.getState("ses_f2_flight")?.rejections, 0)
+})
+
+// F6: state.changed carries toolFailureCount.
+
+test("F6: a state.changed event carries toolFailureCount", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    {
+      type: "assistant",
+      content: [
+        { type: "text", text: "已完成第一阶段的代码审查，共发现 3 个问题。" },
+        { type: "tool", callID: "call_f6", state: { status: "error" } },
+      ],
+    },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: Array<{ toolFailureCount?: number }> = []
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, observeToolFailures: true }),
+    store,
+    (event) => {
+      events.push({ toolFailureCount: (event as { toolFailureCount?: number }).toolFailureCount })
+    },
+  )
+  await store.watch("ses_f6")
+  await engine.maybeInject("ses_f6")
+  assert.equal(store.getMemory("ses_f6").toolFailureCount, 1)
+  assert.ok(events.some((event) => event.toolFailureCount === 1))
+})
+
+// F7: V1 tool_result parts are scanned across ALL messages.
+
+test("F7: a V1 tool_use + separate tool_result(is_error) counts one failure", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    {
+      info: { role: "assistant" },
+      parts: [
+        { type: "text", text: "已完成第一阶段的代码审查，共发现 3 个问题。" },
+        { type: "tool_use", id: "v1_call", tool: "bash" },
+      ],
+    },
+    {
+      info: { role: "user" },
+      parts: [{ type: "tool_result", tool_use_id: "v1_call", is_error: true, content: "boom" }],
+    },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, observeToolFailures: true }),
+    store,
+    () => {},
+  )
+  await store.watch("ses_f7")
+  await engine.maybeInject("ses_f7")
+  assert.equal(store.getMemory("ses_f7").toolFailureCount, 1)
+})
+
+// F8: abort sentinel beats the background-work guard.
+
+test("F8: an abort sentinel stops even while a background subagent is running", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "放弃 <loop-abort>换人工处理</loop-abort>" }] },
+    { type: "synthetic", metadata: { source: "subagent", childID: "ses_child", agent: "fixer" } },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(
+    session as any,
+    () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }),
+    store,
+    (event) => {
+      events.push(event.state)
+    },
+  )
+  await store.watch("ses_f8")
+  await engine.maybeInject("ses_f8")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_f8")?.state, "stopped")
+  assert.ok(events.includes("stopped"))
+})
+
+// Sentinel precedence.
+
+test("abort wins over pause when both sentinels appear", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    {
+      info: { role: "assistant" },
+      parts: [
+        { type: "text", text: "中止吧 <loop-abort>停止</loop-abort> 或者稍等 <loop-pause>等待</loop-pause>" },
+      ],
+    },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_prec_abort")
+  await engine.maybeInject("ses_prec_abort")
+  assert.equal(store.getState("ses_prec_abort")?.state, "stopped")
+  assert.equal(session.prompts.length, 0)
+})
+
+test("a sentinel beats a completion marker in the same message", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成] <loop-abort>还是停吧</loop-abort>" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const events: string[] = []
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
+  })
+  await store.watch("ses_prec_marker")
+  await engine.maybeInject("ses_prec_marker")
+  assert.equal(store.getState("ses_prec_marker")?.state, "stopped")
+  assert.equal(session.prompts.length, 0)
+  assert.ok(!events.includes("confirming"))
+  assert.ok(!events.includes("done"))
+})
+
+test("under verifyCommand a sentinel still stops/pauses without running verify", async () => {
+  let verifyCalls = 0
+  const abortRun = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成] <loop-abort>停</loop-abort>" }] }],
+    async () => {
+      verifyCalls += 1
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await abortRun.store.watch("ses_sent_verify_abort")
+  await abortRun.engine.maybeInject("ses_sent_verify_abort")
+  assert.equal(verifyCalls, 0)
+  assert.equal(abortRun.store.getState("ses_sent_verify_abort")?.state, "stopped")
+  assert.equal(abortRun.session.prompts.length, 0)
+
+  const pauseRun = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成] <loop-pause>等补充</loop-pause>" }] }],
+    async () => {
+      verifyCalls += 1
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await pauseRun.store.watch("ses_sent_verify_pause")
+  await pauseRun.engine.maybeInject("ses_sent_verify_pause")
+  assert.equal(verifyCalls, 0)
+  assert.equal(pauseRun.store.getState("ses_sent_verify_pause")?.state, "paused")
+  assert.equal(pauseRun.session.prompts.length, 0)
+})
+
+// Verify-gate terminal outcomes through the GATE (not only runVerification).
+
+test("verify gate: a timedOut result counts a rejection and re-injects", async () => {
+  const { session, store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => ({
+      pass: false,
+      timedOut: true,
+      spawnUnavailable: false,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      detail: "",
+    }),
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_gate_timeout")
+  await engine.maybeInject("ses_gate_timeout")
+  assert.equal(store.getState("ses_gate_timeout")?.state, "watching")
+  assert.equal(store.getState("ses_gate_timeout")?.rejections, 1)
+  assert.equal(session.prompts.length, 1)
+  assert.match(session.prompts[0] ?? "", /验证未通过/)
+})
+
+test("verify gate: a spawnUnavailable (pass:true) result marks done without looping", async () => {
+  const { session, store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => ({
+      pass: true,
+      timedOut: false,
+      spawnUnavailable: true,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      detail: "",
+    }),
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_gate_unavail")
+  await engine.maybeInject("ses_gate_unavail")
+  assert.equal(store.getState("ses_gate_unavail")?.state, "done")
+  assert.equal(session.prompts.length, 0)
+})
+
+// Lifecycle smoke.
+
+test("resumeKeepAlives schedules intervals only for active watches (lifecycle)", async () => {
+  const { store, engine } = await makeEngine({ intervalMs: 60_000 })
+  await store.watch("ses_ka_watch")
+  await store.watch("ses_ka_paused")
+  await store.markPaused("ses_ka_paused")
+  const scheduled: string[] = []
+  const originalSchedule = engine.scheduleInterval.bind(engine)
+  engine.scheduleInterval = (sessionID: string) => {
+    scheduled.push(sessionID)
+    return originalSchedule(sessionID)
+  }
+  engine.resumeKeepAlives()
+  assert.ok(scheduled.includes("ses_ka_watch"))
+  assert.ok(!scheduled.includes("ses_ka_paused"))
+  engine.stopInterval("ses_ka_watch")
+})
+
+test("abortVerify aborts an in-flight verification command (lifecycle)", async () => {
+  let observedSignal: AbortSignal | undefined
+  let runnerStarted: () => void = () => {}
+  const startedGate = new Promise<void>((resolve) => {
+    runnerStarted = resolve
+  })
+  const { store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async (spec) => {
+      observedSignal = spec.signal
+      runnerStarted()
+      await new Promise<void>((resolve) => {
+        if (spec.signal?.aborted) return resolve()
+        spec.signal?.addEventListener("abort", () => resolve())
+      })
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_abortverify")
+  const inflight = engine.maybeInject("ses_abortverify")
+  await startedGate
+  engine.abortVerify("ses_abortverify")
+  await store.unwatch("ses_abortverify")
+  await inflight
+  assert.equal(observedSignal?.aborted, true)
+  assert.equal(store.getState("ses_abortverify"), undefined)
+})
+
+test("WatchStore.resetInjectionCount dead code is removed", async () => {
+  const { store } = await makeEngine()
+  assert.equal((store as { resetInjectionCount?: unknown }).resetInjectionCount, undefined)
 })

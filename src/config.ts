@@ -180,12 +180,23 @@ export function parseJsonc(text: string): unknown {
       index += 2
       while (index < text.length && !(text[index] === "*" && text[index + 1] === "/")) index++
       index += 2
+    } else if (char === ",") {
+      // Drop a real trailing comma only when the next non-whitespace char
+      // closes the object/array. Commas inside strings never reach here
+      // (handled by the inString branch above), so "a,}" stays intact.
+      let lookahead = index + 1
+      while (lookahead < text.length && /\s/.test(text[lookahead])) lookahead++
+      if (text[lookahead] === "}" || text[lookahead] === "]") {
+        index++
+        continue
+      }
+      result += char
+      index++
     } else {
       result += char
       index++
     }
   }
-  result = result.replace(/,\s*([}\]])/g, "$1")
   return JSON.parse(result)
 }
 
@@ -197,10 +208,18 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   if (typeof overrides.message === "string" && overrides.message) merged.message = overrides.message
   if (typeof overrides.startTime === "string") merged.startTime = overrides.startTime
   if (typeof overrides.endTime === "string") merged.endTime = overrides.endTime
-  if (typeof overrides.idleDelayMs === "number") merged.idleDelayMs = overrides.idleDelayMs
-  if (typeof overrides.minIntervalMs === "number") merged.minIntervalMs = overrides.minIntervalMs
-  if (typeof overrides.maxConsecutive === "number") merged.maxConsecutive = overrides.maxConsecutive
-  if (typeof overrides.watchTimeoutMs === "number") merged.watchTimeoutMs = Math.max(0, overrides.watchTimeoutMs)
+  if (typeof overrides.idleDelayMs === "number" && Number.isFinite(overrides.idleDelayMs)) {
+    merged.idleDelayMs = overrides.idleDelayMs
+  }
+  if (typeof overrides.minIntervalMs === "number" && Number.isFinite(overrides.minIntervalMs)) {
+    merged.minIntervalMs = overrides.minIntervalMs
+  }
+  if (typeof overrides.maxConsecutive === "number" && Number.isFinite(overrides.maxConsecutive)) {
+    merged.maxConsecutive = overrides.maxConsecutive
+  }
+  if (typeof overrides.watchTimeoutMs === "number" && Number.isFinite(overrides.watchTimeoutMs)) {
+    merged.watchTimeoutMs = Math.max(0, overrides.watchTimeoutMs)
+  }
   if (Array.isArray(overrides.completionMarkers)) {
     merged.completionMarkers = overrides.completionMarkers.filter(
       (marker): marker is string => typeof marker === "string",
@@ -226,24 +245,26 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
       (keyword): keyword is string => typeof keyword === "string",
     )
   }
-  if (typeof overrides.userGraceMs === "number") merged.userGraceMs = overrides.userGraceMs
+  if (typeof overrides.userGraceMs === "number" && Number.isFinite(overrides.userGraceMs)) {
+    merged.userGraceMs = overrides.userGraceMs
+  }
   // intervalMs: 0 means periodic checks disabled (scheduleInterval honors <=0).
   // Preserve the P2-7 anti-spam floor (min 1s) only for positive values, so the
   // documented "0 = disabled" escape hatch is actually reachable via config.
-  if (typeof overrides.intervalMs === "number") {
+  if (typeof overrides.intervalMs === "number" && Number.isFinite(overrides.intervalMs)) {
     merged.intervalMs = overrides.intervalMs <= 0 ? 0 : Math.max(1_000, overrides.intervalMs)
   }
   if (typeof overrides.verifyCommand === "string") merged.verifyCommand = overrides.verifyCommand
-  if (typeof overrides.verifyTimeoutMs === "number") {
+  if (typeof overrides.verifyTimeoutMs === "number" && Number.isFinite(overrides.verifyTimeoutMs)) {
     // Clamp 1s..3600s (对齐 dsh-pua configuration.ts:21-32).
     merged.verifyTimeoutMs = Math.min(3_600_000, Math.max(1_000, overrides.verifyTimeoutMs))
   }
-  if (typeof overrides.verifyMaxIterations === "number") {
+  if (typeof overrides.verifyMaxIterations === "number" && Number.isFinite(overrides.verifyMaxIterations)) {
     // Clamp 0..10000 (0 = unlimited).
     merged.verifyMaxIterations = Math.min(10_000, Math.max(0, overrides.verifyMaxIterations))
   }
   if (typeof overrides.verifyCwd === "string") merged.verifyCwd = overrides.verifyCwd
-  if (typeof overrides.selfEchoWindowMs === "number") {
+  if (typeof overrides.selfEchoWindowMs === "number" && Number.isFinite(overrides.selfEchoWindowMs)) {
     merged.selfEchoWindowMs = Math.max(0, overrides.selfEchoWindowMs)
   }
   // Sentinel tags accept any string, including "" (which disables the sentinel).

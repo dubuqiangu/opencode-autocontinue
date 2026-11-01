@@ -242,19 +242,12 @@ export class WatchStore {
       memory.pendingContinueAt = 0
     }
     // P2-10: 若值守窗口已过（endAt 过去），resume 不应把它翻回 watching 后又被
-    // 下一次 idle 打回 stopped（反复翻转）。调用方传 recomputeEndAt=true 时按
-    // 当前配置重算 endAt（新一轮值守窗口）。
+    // 下一次 idle 打回 stopped（反复翻转）。调用方传 recomputeEndAt=true 时，仅
+    // 在窗口已过的情况下把 endAt 置 0 —— 即关闭当日截止（0 = 无每日截止），本轮
+    // 余下时间不再受 endAt 限制；这里并不重算 endAt。
     if (recomputeEndAt && entry.endAt && Date.now() >= entry.endAt) {
       entry.endAt = 0
     }
-    await this.persist()
-  }
-
-  /** Reset injection counter (real user message / successful progress). */
-  async resetInjectionCount(sessionID: string): Promise<void> {
-    const entry = this.watched.get(sessionID)
-    if (!entry) return
-    entry.injections = 0
     await this.persist()
   }
 

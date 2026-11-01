@@ -187,6 +187,10 @@ export function stripControlChars(text: string): string   // 去 ANSI / C0
 
 ### 3.5 #3 升级式提示（**降为两档**）
 
+> **已于 v0.5.0 移除**：`escalationMessages` 的「整条替换两档」在 v0.5.0 被删除（breaking），
+> 改为「基础 `message` + 轮次压力梯 + 阈值追加」，见 §7.3。以下为第一轮（v0.4.0）的原始
+> 设计，仅作历史记录；当前实现已不再有 `escalationMessages`。
+
 ```ts
 escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 ```
@@ -431,3 +435,89 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 - TUI 构建：改动 `src/tui.tsx` 后必须 `npm run build:tui`。
 - 发布：bump `0.4.0` → `0.5.0` + changelog 新行 + 脱敏扫描（独立成步，先读输出）+ `verify-install.ps1`。
 - 实机（**重启 TUI**）：查 `opencode.db` `session_message` 新行 `type` 与 `opencode-autocontinue.watched` KV。
+
+---
+
+## 8. 第三轮（v0.5.1）：全项目审查修复
+
+> 范围：对 `5ffbbd1` 做全项目审查（@oracle 缺陷审计 + @explorer 覆盖/漂移表），
+> 逐条对源码复核后，修复高置信缺陷、补测、同步文档。所有改动经独立扫描后发布。
+
+### 8.1 缺陷裁定表
+
+| ID | 级别 | 位置 | 裁定 |
+|---|---|---|---|
+| F1 | **高** | `engine.ts:414` `startTimeNotReached` | **修**：跨午夜窗口在次日 00:00–startTime 之间被误判「未到点」而不注入 |
+| F2 | **高** | `engine.ts:334` `runVerifyGate` | **修**：验证前的 TOCTOU——await 期间用户新消息 bump `roundId`，导致陈旧结果被当新轮，误 `done`/注入 |
+| F4 | 中 | `config.ts` `mergeConfig` | **修**：数值键不校验有限性，`1e400`→`Infinity` 触发 hot timer |
+| F5 | 中 | `config.ts:188` `parseJsonc` | **修**：尾逗号正则不做字符串边界跟踪，字符串内的 `,}`/`,]` 被吃掉 |
+| F6 | 中 | `rpc.ts` `state.changed` schema | **修**：TUI 读 `toolFailureCount`，但事件 schema/`WatchStatusEvent`/发射端均未携带（`additionalProperties:false` 会丢弃） |
+| F7 | 低 | `engine.ts:621-636` `latestAssistantText` | **修**：工具 part 仅在 assistant 消息内扫描，V1 `tool_result` 永远扫不到 → 计数器对 V1 失效 |
+| F9 | 低 | `verify.ts:178` `stopGracefully` | **修**：grace 定时器未跟踪/未清理，resolve 后仍会 +1s 触发 killTree |
+| F12 | 低 | `verify.ts:193,196` | **修**：`String(chunk)` 非增量解码，跨 chunk 的多字节字符被替换为 U+FFFD |
+| F11 | 低 | `state.ts:247-249` `resume` | **只修注释 + 补测**：代码是「窗口已过则关闭 endAt」，注释却写「重算 endAt」；行为保留（改行为有回归风险，另议） |
+| F3 | 中 | 设计面 | **只记录**：模型转述验证输出可反射哨兵/完成标记。缓解需要脆弱启发式；verify 模式已用 exit code 消解完成判定，记入 `known-issues.md` |
+| F8 | 低 | `engine.ts:487/493` | **修（小改）**：abort 哨兵移到 `backgroundWorkRunning` 守卫之前（显式 abort 必须生效）；pause 保持在守卫之后 |
+| F10 | — | `engine.forgetSession` | **无需动作**：`unwatch()` 已清 `inMemory`；`getMemory` 惰性重建只对仍在值守的会话发生 |
+| F13 | 低 | `engine.ts:862-933` | **只记录**：assistant 事件路径不判哨兵，靠随后的 `session.idle` 兜底（默认最多延迟一个 `intervalMs`） |
+
+### 8.2 修复规格
+
+**F1 跨午夜起点闸**：把 `startTimeNotReached(startTime)` 改为跨午夜感知——当 `endTime` 与
+`startTime` 构成跨午夜窗口（复用 `computeEndAt` 的 `crossMidnight` 判定）时，次日
+`00:00..startTime` 之间应视为「已到点」（窗口仍开）。做法：新增
+`export function startGateClosed(startTime: string, endTime: string): boolean`（跨午夜时，若 `now < startTime` 但 `now < endTime`（即处于跨夜尾段）则返回 false）。`maybeInject` 用它替换 `startTimeNotReached`。非跨日窗口保持原语义。
+
+**F2 验证前 TOCTOU**：`runVerifyGate` 的 `hasSignal` 分支在创建 controller **之前**重取快照：
+`const freshGate = this.store.getState(sessionID)`；校验 state 为 watching/confirming（否则 return）；
+校验 `memory.lastUserMessageAt` 未落在 `userGraceMs` 内（否则 return）；`const roundBefore = freshGate.roundId`。
+（`!hasSignal` 分支已有同等校验，不动。）
+
+**F4 数值有限性**：`mergeConfig` 中所有 `typeof x === "number"` 的数值键改为
+`typeof x === "number" && Number.isFinite(x)`；钳制键在钳制前也要求有限（`verifyTimeoutMs`/`verifyMaxIterations`）。
+确保 `1e400`/`NaN`/`-Infinity` 一律回退默认。
+
+**F5 字符串感知尾逗号**：删除 `config.ts:188` 的事后正则，改为在同一字符扫描内处理——
+`!inString` 且当前字符为 `,` 时，向前跳过空白，若下一个非空白字符是 `}` 或 `]` 则不写入该逗号。
+空 tag 语义不变；保持单引号归一、`\'`/`""` 转义、注释剥离等既有行为。新增导出或保持私有均可，但不得改变 `parseJsonc` 签名。
+
+**F6 事件携带 toolFailureCount**：`WatchStatusEvent` 加 `toolFailureCount?: number`；
+`state.changed` 的 `schema.properties` 加 `toolFailureCount: { type:"number" }`（仍在 `required` 之外，因 `additionalProperties:false` 必须显式声明）；
+`engine.emitChangedInternal` 与 `index.ts` 的 `rpcImplementation.set` 发射时带
+`toolFailureCount: this.store.getMemory(sessionID).toolFailureCount`（`set` 处用 `0` 或现有值）。TUI 侧不改（已读该字段）。
+
+**F7 V1 工具结果**：`latestAssistantText` 把工具 part 扫描移出 `role/type === "assistant"` 分支——
+对**每条消息**读取其 `parts ?? content` 并识别 `tool` / `tool_use` / `tool_result`；
+`tool_result` 用 `is_error === true` 置 `lastToolErrored = true`（可选 `tool_use_id` 回填 id）。V2 行为不变。
+
+**F8 abort 优先级**：把 abort 哨兵块移到 `if (latest.backgroundWorkRunning) return` 之前；
+pause 块保持在守卫之后。测试锁定：`backgroundWorkRunning=true` 时 `<loop-abort>` 仍 → `stopped`。
+
+**F9/F12 verify.ts**：`stopGracefully` 用 `let graceTimer` 跟踪 `setTimeout(killTree, GRACE_MS)`，并在 `finish` 中 `clearTimeout(graceTimer)`；
+stdout/stderr 改用 `new StringDecoder("utf8")`（每个流一个）`.write(chunk)` 增量解码，替代 `String(chunk)`。
+
+**F11 注释对齐**：`state.ts:244-249` 注释改为准确描述「窗口已过时置 0（关闭当日截止），不重算」；新增单测锁定该行为。
+
+### 8.3 本轮删除
+- `state.ts` `resetInjectionCount`（导出的死代码，`src/` 无调用）——删除。
+
+### 8.4 补测清单
+- F1：跨午夜 `maybeInject` 集成（`startTime 22:00 / endTime 08:30`，注入在 03:00 仍可发生）；`computeEndAt`/起始闸边界。
+- F2：验证命令运行期间用户消息 → 结果丢弃、不 `done`、不注入。
+- F4/F5：非有限数值回退默认；字符串含 `,}` / `, ]` 原样保留；真尾逗号仍被剥离。→ 新文件 `test/config-safety.test.ts`。
+- F6：`state.changed` 事件携带 `toolFailureCount`。
+- F7：V1 `tool_use`+`tool_result(is_error)` 使计数器 +1。
+- F8：`backgroundWorkRunning` 下 abort 仍停止。
+- F9/F12：多字节跨 chunk 输出不产生 U+FFFD；grace 后无悬挂定时器（可断言 resolve 及时）。
+- 哨兵优先级：abort 与 pause 同时出现 → abort；abort/pause 与完成标记同时出现 → 哨兵；`verifyCommand` 下哨兵仍生效。
+- verify 门控终局：`timedOut` 与 `spawnUnavailable` 经**门控**（非仅 `runVerification` 单测）走通。
+- 生命周期：`resumeKeepAlives`、`forgetSession`、`abortVerify` 至少各一条。
+
+### 8.5 文档同步（本轮）
+`features/config.md`（`endTime` 默认实为 `""`）、`features/commands.md`（事件载荷字段、`N injection(s)`）、
+`features/engine.md`（两阶段 done、`injections` 而非 `consecutive`、abort 真实来源）、
+`architecture/events-and-state.md`（状态联合补 `confirming`/`paused`、存储字段、mermaid）、
+`architecture/module-layout.md`（补 `verify.ts`/`reactive-mount.ts`、`AUTOCONTINUE_RPC_CONTRACT` 非 `Rpc.define`）、
+`architecture/overview.md` 与 `docs/README.md`（footer 符号、测试数、侧栏块）、
+`decisions/known-issues.md`（F3 反射风险、F13 延迟）、`decisions/roadmap.md`、`decisions/changelog.md`（0.5.1 行 + 修正 0.5.0 计数）。
+本文件 §3.5 关于 `escalationMessages` 的现行描述一并更正为「已于 v0.5.0 移除」。

@@ -87,6 +87,7 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
           totalInjections: { type: "number" },
           rejections: { type: "number" },
           verifying: { type: "boolean" },
+          toolFailureCount: { type: "number" },
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false,
@@ -143,6 +144,8 @@ export interface WatchStatusEvent {
   totalInjections: number
   rejections?: number
   verifying?: boolean
+  /** Observed distinct tool failures in the current round (opt-in, observation only). */
+  toolFailureCount?: number
 }
 
 export interface RpcContract {
@@ -171,6 +174,7 @@ export interface RpcContract {
           totalInjections: { type: "number" }
           rejections: { type: "number" }
           verifying: { type: "boolean" }
+          toolFailureCount: { type: "number" }
         }
         required: ["sessionID", "state", "injections", "totalInjections"]
         additionalProperties: false

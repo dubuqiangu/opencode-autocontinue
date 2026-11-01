@@ -5,6 +5,8 @@
 // is no command-injection surface. Its OUTPUT, however, is untrusted data and
 // is always marked as such before being injected back into the session.
 
+import { StringDecoder } from "node:string_decoder"
+
 export interface VerifyResult {
   pass: boolean
   timedOut: boolean
@@ -131,11 +133,13 @@ async function defaultSpawn(
     let stdout = ""
     let stderr = ""
     let timedOut = false
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
     const finish = (exitCode: number | null, spawnUnavailable = false) => {
       if (settled) return
       settled = true
       clearTimeout(timeoutTimer)
       clearTimeout(fallbackTimer)
+      clearTimeout(graceTimer)
       if (opts.signal) opts.signal.removeEventListener("abort", onAbort)
       resolve({ exitCode, stdout, stderr, timedOut, spawnUnavailable })
     }
@@ -175,7 +179,7 @@ async function defaultSpawn(
       } catch {
         // Already gone.
       }
-      setTimeout(killTree, GRACE_MS)
+      graceTimer = setTimeout(killTree, GRACE_MS)
     }
     const onAbort = () => stopGracefully()
     const timeoutTimer = setTimeout(() => {
@@ -189,11 +193,13 @@ async function defaultSpawn(
       if (opts.signal.aborted) onAbort()
       else opts.signal.addEventListener("abort", onAbort, { once: true })
     }
+    const stdoutDecoder = new StringDecoder("utf8")
+    const stderrDecoder = new StringDecoder("utf8")
     child.stdout?.on("data", (chunk) => {
-      stdout = appendBoundedCapped(stdout, String(chunk), STREAM_MAX_BYTES)
+      stdout = appendBoundedCapped(stdout, stdoutDecoder.write(chunk), STREAM_MAX_BYTES)
     })
     child.stderr?.on("data", (chunk) => {
-      stderr = appendBoundedCapped(stderr, String(chunk), STREAM_MAX_BYTES)
+      stderr = appendBoundedCapped(stderr, stderrDecoder.write(chunk), STREAM_MAX_BYTES)
     })
     // A launch failure (e.g. powershell.exe missing) is not a test failure: mark
     // it unavailable so the gate trusts the model's completion instead of

@@ -105,6 +105,7 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
         totalInjections: entry?.totalInjections ?? 0,
         rejections: entry?.rejections ?? 0,
         verifying: false,
+        toolFailureCount: store.getMemory(input.sessionID).toolFailureCount,
       })
       return { state }
     },

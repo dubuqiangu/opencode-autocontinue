@@ -39,11 +39,12 @@ metadata（`origin: "opencode-autocontinue"`），使注入回流不被误判为
 
 | 停止条件 | 说明 |
 |---|---|
-| 完成标记 | 最后一条 assistant 消息命中 `completionMarkers`（或 `markerRegex`）→ `done` |
-| 最大连续次数 | `consecutive >= maxConsecutive`（默认 20）→ 停止 |
+| 完成标记（两阶段） | 最后一条 assistant 消息首次命中 `completionMarkers`（或 `markerRegex`）→ 进入 `confirming` 并注入 `finalCheckMessage`；复查回复再次命中 → `done`。`finalCheckEnabled: false` 时命中即 `done` |
+| 最大连续注入次数 | `injections >= maxConsecutive`（默认 20）→ 停止 |
 | 值守时段 | 到达 `endTime`（watch 时冻结 endAt；跨午夜窗口如 22:00→08:30 会自动滚动到次日，非跨日窗口当天已过立即停止）→ 停止 |
 | 用户手动 off | `/autocontinue off` → 停止 |
-| 用户主动中止 | `MessageAbortedError` / `operation was aborted` / `session.interrupt` → 停止但保留值守标记（可重新 on） |
+| 用户主动中止 | `session.execution.interrupted`（V2）/ `session.idle` 且 `outcome="interrupted"`（V1，Esc 手工停止）→ 停止但保留值守标记（可重新 on）。`MessageAbortedError` / `operation was aborted` 属 `excludePatterns`（不自动续跑的错误特征），并非停止来源 |
+| 模型终止/暂停哨兵 | `<loop-abort>…</loop-abort>` → `stopped`；`<loop-pause>…</loop-pause>` → `paused`（成对标签，仅读 assistant 文本） |
 
 ## 防重 / 防冲突
 

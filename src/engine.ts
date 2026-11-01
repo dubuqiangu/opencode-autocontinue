@@ -96,6 +96,35 @@ export function startTimeNotReached(startTime: string): boolean {
   return now.getTime() < start.getTime()
 }
 
+/** Cross-midnight-aware start gate: true only when the watch window is
+ *  genuinely NOT open yet.
+ *  - Empty/invalid startTime -> false (always open), mirroring
+ *    startTimeNotReached.
+ *  - Non-cross-midnight window -> identical to startTimeNotReached: `now`
+ *    before startTime means the window has not opened.
+ *  - Cross-midnight window (endTime clock earlier than startTime clock, e.g.
+ *    22:00 -> 08:30): after midnight `now` is before startTime, but while it is
+ *    also before endTime we are in the post-midnight tail where the window is
+ *    STILL OPEN, so the gate must not close. */
+export function startGateClosed(startTime: string, endTime: string): boolean {
+  const startMatch = /^(\d{1,2}):(\d{2})$/.exec((startTime ?? "").trim())
+  if (!startMatch) return false
+  const now = new Date()
+  const start = new Date(now)
+  start.setHours(Number(startMatch[1]), Number(startMatch[2]), 0, 0)
+  if (now.getTime() >= start.getTime()) return false
+  // now < startTime: genuinely closed only when the window is not cross-midnight,
+  // or when the clock is already past the cross-midnight endTime (the pre-start
+  // gap, not the post-midnight tail).
+  const endMatch = /^(\d{1,2}):(\d{2})$/.exec((endTime ?? "").trim())
+  if (!endMatch) return true
+  const end = new Date(now)
+  end.setHours(Number(endMatch[1]), Number(endMatch[2]), 0, 0)
+  const crossMidnight = end.getTime() < start.getTime()
+  if (crossMidnight && now.getTime() < end.getTime()) return false
+  return true
+}
+
 /** Replace a provider failure's retry decision when it looks transient. */
 export function retryHookHandler(
   config: () => PluginConfig,
@@ -330,8 +359,17 @@ export class AutocontinueEngine {
       return
     }
 
+    // F2 (pre-command TOCTOU): `entry` is a live object reference captured
+    // before maybeInject's awaits (resolveTitle / latestAssistantText). A real
+    // user message landing during those awaits bumps that same object's roundId
+    // via resume(), so reading roundBefore from it would record the NEW id and
+    // the post-command staleness check would wrongly pass. Re-read a fresh
+    // snapshot and validate BEFORE starting the command.
+    const freshGate = this.store.getState(sessionID)
+    if (!freshGate || (freshGate.state !== "watching" && freshGate.state !== "confirming")) return
+    if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
     // B-4: capture the round identity BEFORE awaiting the command.
-    const roundBefore = entry.roundId
+    const roundBefore = freshGate.roundId
     const controller = new AbortController()
     memory.activeVerifyAbort = controller
     this.activeVerifyControllers.set(sessionID, controller)
@@ -411,7 +449,7 @@ export class AutocontinueEngine {
       }
 
       // Time window (endAt frozen at watch time).
-      if (startTimeNotReached(cfg.startTime)) return
+      if (startGateClosed(cfg.startTime, cfg.endTime)) return
       if (entry.endAt && Date.now() >= entry.endAt) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
@@ -480,16 +518,13 @@ export class AutocontinueEngine {
         this.store.observeToolOutcome(sessionID, latest.lastToolId, latest.lastToolErrored)
       }
 
-      // User's guard: if a background subagent/task is still running, do NOT
-      // mark done and do NOT inject a continuation — the overall task is not
-      // complete until the background work settles. Keep watching so the next
-      // trigger re-checks once the subagent finishes.
-      if (latest.backgroundWorkRunning) return
-
       // Abort / pause sentinels (paired tags in the assistant text, shared by
       // verify and non-verify modes). Only the assistant text is scanned — the
       // verify command's output (verify.detail) is untrusted data and is never
       // consulted for control flow (§3.7).
+      // F8: an explicit abort must beat the background-work guard below — a
+      // running (or orphaned non-terminal) subagent must never make the model's
+      // explicit abort be ignored.
       if (matchSentinel(latest.text, cfg.abortSentinelTag)) {
         await this.store.markStopped(sessionID)
         this.clearTimer(sessionID)
@@ -497,6 +532,15 @@ export class AutocontinueEngine {
         void this.emitChangedInternal(sessionID, "stopped")
         return
       }
+
+      // User's guard: if a background subagent/task is still running, do NOT
+      // mark done and do NOT inject a continuation — the overall task is not
+      // complete until the background work settles. Keep watching so the next
+      // trigger re-checks once the subagent finishes.
+      if (latest.backgroundWorkRunning) return
+
+      // Pause sentinel stays AFTER the background-work guard: pausing is not a
+      // hard override of in-flight work, unlike abort.
       if (matchSentinel(latest.text, cfg.pauseSentinelTag)) {
         await this.store.markPaused(sessionID)
         this.clearTimer(sessionID)
@@ -614,25 +658,36 @@ export class AutocontinueEngine {
           const content = (message as { content?: unknown }).content
           latestText = messageText(parts) || messageText(content)
           latestParts = parts ?? content
-          // Record the LAST tool part so the opt-in failure counter can observe
-          // its outcome. V2: { type:"tool", callID?, id?, state:{status} }.
-          // V1: tool_use records its id; a later tool_result with is_error
-          // resolves whether it errored.
-          const partList = Array.isArray(latestParts) ? latestParts : []
-          for (const part of partList) {
-            if (!part || typeof part !== "object") continue
-            const partType = (part as { type?: string }).type
-            if (partType === "tool") {
-              const toolPart = part as { callID?: string; id?: string; state?: { status?: string } }
-              lastToolId = toolPart.callID ?? toolPart.id
-              lastToolErrored = toolPart.state?.status === "error"
-            } else if (partType === "tool_use") {
-              const toolUsePart = part as { callID?: string; id?: string }
-              lastToolId = toolUsePart.callID ?? toolUsePart.id
-              lastToolErrored = false
-            } else if (partType === "tool_result") {
-              if ((part as { is_error?: boolean }).is_error === true) lastToolErrored = true
-            }
+        }
+        // Record the LAST tool part so the opt-in failure counter can observe
+        // its outcome. This scan runs for EVERY message, not just assistant
+        // ones: V2 parts live on assistant messages, but V1 tool_result parts
+        // arrive in a separate user/tool message, so scanning only inside the
+        // assistant branch would never see them. Scanning in message order
+        // yields the same V2 result as before.
+        // V2: { type:"tool", callID?, id?, state:{status} }.
+        // V1: tool_use records its id; a later tool_result with is_error
+        // resolves whether it errored (id backfilled from tool_use_id).
+        const scannedParts =
+          (message as { parts?: unknown }).parts ?? (message as { content?: unknown }).content
+        const partList = Array.isArray(scannedParts) ? scannedParts : []
+        for (const part of partList) {
+          if (!part || typeof part !== "object") continue
+          const partType = (part as { type?: string }).type
+          if (partType === "tool") {
+            const toolPart = part as { callID?: string; id?: string; state?: { status?: string } }
+            lastToolId = toolPart.callID ?? toolPart.id
+            lastToolErrored = toolPart.state?.status === "error"
+          } else if (partType === "tool_use") {
+            const toolUsePart = part as { callID?: string; id?: string }
+            lastToolId = toolUsePart.callID ?? toolUsePart.id
+            lastToolErrored = false
+          } else if (partType === "tool_result") {
+            if ((part as { is_error?: boolean }).is_error === true) lastToolErrored = true
+            const resultId =
+              (part as { tool_use_id?: string }).tool_use_id ??
+              (part as { toolUseID?: string }).toolUseID
+            if (resultId) lastToolId = resultId
           }
         }
         // Background subagent/task in flight: a synthetic message whose metadata
@@ -707,6 +762,7 @@ export class AutocontinueEngine {
       totalInjections: entry?.totalInjections ?? 0,
       rejections: entry?.rejections ?? 0,
       verifying: this.store.isVerifying(sessionID),
+      toolFailureCount: this.store.getMemory(sessionID).toolFailureCount,
     })
   }
 

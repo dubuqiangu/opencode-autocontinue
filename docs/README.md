@@ -8,7 +8,7 @@ OpenCode V2 插件：自动续跑因非用户原因中断、但整体任务尚�
 |---|---|---|
 | **使用** | [guides/install.md](guides/install.md) | 安装 / 更新 / 验证 / 卸载 / 热重载注意事项 |
 | | [features/commands.md](features/commands.md) | `/autocontinue on\|off\|status` 命令与 RPC 契约 |
-| | [features/footer.md](features/footer.md) | footer 状态指示 `[AC ●]` / `[AC ✓]` / `[AC ⏸ N]` |
+| | [features/footer.md](features/footer.md) | footer 状态指示 `[AC ●]` / `[AC ✓]` / `[AC ⏸]`(paused) / `[AC ⏹ N]`(stopped) + 右侧栏 Watch 块 |
 | | [features/engine.md](features/engine.md) | 自动续跑引擎：retry 第一道防线、错误/空闲注入、完成判定与停止条件 |
 | | [features/config.md](features/config.md) | 配置系统：全局 + 项目覆盖、JSONC 解析、全部配置项 |
 | **架构** | [architecture/overview.md](architecture/overview.md) | 项目概述、加载机制、总体数据流、验证方式 |

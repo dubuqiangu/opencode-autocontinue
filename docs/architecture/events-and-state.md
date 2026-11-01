@@ -22,6 +22,7 @@
 - `sessionIDFromEvent` 双兼容：V2 事件 `event.sessionID` 平铺 / 嵌套兼容
 - error 提取：从 `session.error` / assistant 消息错误载荷取错误文本，归一为 `name: message (status: N)`（status 存在时拼入，纯 5xx 裸状态也能匹配 `errorPatterns`）
 - 完成标记正则：编译 `completionMarkers` 或 `markerRegex`，匹配 assistant 文本；**空 `completionMarkers` 返回 null matcher**（不检测完成，会话持续值守）
+- 哨兵匹配：`matchSentinel(text, tag)` 对 tag 做正则转义后构造成对标签 `<tag>…</tag>`（非空夹注，大小写敏感），返回夹注内容；空 tag 返回 `undefined`
 
 ## 状态数据结构
 
@@ -31,18 +32,24 @@ server storage（`ctx.storage.set/get`，跨重启）：
 {
   "watched": {
     "ses_xxx": {
+      "sessionID": "ses_xxx",
       "since": 1730000000000,
-      "consecutive": 3,
+      "injections": 3,
+      "totalInjections": 5,
+      "rejections": 0,
+      "roundId": 2,
       "lastInjectedAt": 1730000060000,
-      "state": "watching|stopped|done"
+      "state": "watching|confirming|stopped|paused|done"
     }
   }
 }
 ```
 
 - `watched` 键由 `/autocontinue on` 写入、`off` 删除
-- `consecutive` 在真实用户消息/完成任务时归零
-- 内存态另含 `inFlight` / `pendingContinue` 锁（不持久化）
+- `injections` 本轮注入计数（真实用户消息 `resume()` 归零，驱动 `maxConsecutive`）；`totalInjections` 本次 watch 起的累计（不随用户消息清零）
+- `rejections` 本轮验证失败次数；`roundId` 轮次标识（`resume()` +1，用于丢弃陈旧验证结果）。旧字段 `consecutive` 已于 v0.3.0 移除
+- `state` 联合 `watching | confirming | stopped | paused | done`；hydrate 保留 `paused`（等待用户输入的活动值守），丢弃终态 `done` / `stopped`
+- 内存态另含 `inFlight` / `pendingContinue` / `verifying` 等锁（不持久化）
 
 ## 状态机
 
@@ -50,8 +57,12 @@ server storage（`ctx.storage.set/get`，跨重启）：
 stateDiagram-v2
     [*] --> Watching: /autocontinue on<br/>写入 storage
     Watching --> Watching: session.error/idle<br/>判定通过 → 注入续跑
-    Watching --> Done: 命中完成标记<br/>footer [AC ✓]
-    Watching --> Stopped: 达 maxConsecutive<br/>或到 endTime / 用户 off
+    Watching --> Confirming: 命中完成标记<br/>注入 finalCheckMessage
+    Confirming --> Done: 复查回复再次命中标记<br/>footer [AC ✓]
+    Confirming --> Watching: 复查回复无标记<br/>回到 watching
+    Watching --> Paused: pause 哨兵<br/>等待用户新消息
+    Paused --> Watching: 用户新消息 / resume()
+    Watching --> Stopped: 达 maxConsecutive / 到 endTime / off<br/>或 abort 哨兵
     Stopped --> Watching: /autocontinue on
     Done --> Watching: /autocontinue on
     Watching --> [*]: /autocontinue off<br/>删除 storage 记录
