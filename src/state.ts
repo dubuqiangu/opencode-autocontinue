@@ -27,6 +27,14 @@ export interface InMemoryState {
   lastSelfInjection?: { text: string; at: number }
   /** Aborts a still-running verification command (off / dispose / new round). */
   activeVerifyAbort?: AbortController
+  /** True while this session's verification command is in flight (drives the
+   *  "verifying" indicator in the TUI). */
+  verifying: boolean
+  /** Opt-in tool-failure observation counter (does NOT affect completion). */
+  toolFailureCount: number
+  /** Rolling window of distinct failed tool ids, so a retried failure is not
+   *  double-counted (capped at the last 128 ids). */
+  toolFailureIds: string[]
 }
 
 export class WatchStore {
@@ -51,7 +59,8 @@ export class WatchStore {
           // across restarts made every previously watched session report
           // watched=true forever, which kept the sidebar "Watch" block on
           // screen by default. Drop them on hydrate; the next persist()
-          // rewrites storage without them.
+          // rewrites storage without them. A paused row IS preserved: it is an
+          // active watch waiting on user input.
           if (entry.state === "done" || entry.state === "stopped") continue
           // Normalize legacy rows: old persisted data may lack since/injections
           // or carry null lastInjectedAt, which would fail the RPC schema
@@ -64,7 +73,7 @@ export class WatchStore {
             (typeof legacyHeartbeats === "number" ? legacyHeartbeats : 0)
           this.watched.set(sessionID, {
             sessionID,
-            state: entry.state === "done" || entry.state === "stopped" ? entry.state : "watching",
+            state: entry.state === "paused" ? "paused" : "watching",
             injections: typeof entry.injections === "number" ? entry.injections : legacyTotal,
             totalInjections: typeof entry.totalInjections === "number" ? entry.totalInjections : legacyTotal,
             since: typeof entry.since === "number" ? entry.since : now,
@@ -116,6 +125,9 @@ export class WatchStore {
         lastUserMessageAt: 0,
         lastBusyAt: 0,
         lastActiveAt: 0,
+        verifying: false,
+        toolFailureCount: 0,
+        toolFailureIds: [],
       }
       this.inMemory.set(sessionID, memory)
     }
@@ -183,6 +195,15 @@ export class WatchStore {
     await this.persist()
   }
 
+  /** Pause the watch after a model pause sentinel: waiting on the user, no
+   *  injection until a real user turn flips it back to watching (resume()). */
+  async markPaused(sessionID: string): Promise<void> {
+    const entry = this.watched.get(sessionID)
+    if (!entry) return
+    entry.state = "paused"
+    await this.persist()
+  }
+
   /** Move a session into the final-check phase after its first completion marker.
    *  The watch round continues; a second marker (after the review injection)
    *  will mark it done. */
@@ -237,9 +258,35 @@ export class WatchStore {
     await this.persist()
   }
 
+  /** True while this session's verification command is in flight. */
+  isVerifying(sessionID: string): boolean {
+    return this.inMemory.get(sessionID)?.verifying ?? false
+  }
+
+  /** Observe one tool outcome for the opt-in failure counter (observation only,
+   *  never affects completion/stop). Deduplicated over a rolling window of the
+   *  last 128 distinct failed ids; a terminal success resets the count without
+   *  clearing the window (so a retried failure is not double-counted). */
+  observeToolOutcome(sessionID: string, id: string | undefined, errored: boolean): void {
+    const memory = this.getMemory(sessionID)
+    if (errored) {
+      // A failure without a stable id cannot be deduplicated — skip it rather
+      // than inflating the count on every scan.
+      if (!id) return
+      if (memory.toolFailureIds.includes(id)) return
+      memory.toolFailureCount = Math.min(memory.toolFailureCount + 1, 1_000_000)
+      memory.toolFailureIds.push(id)
+      memory.toolFailureIds = memory.toolFailureIds.slice(-128)
+      return
+    }
+    // Terminal success clears the count but keeps the window (防同 id 重计).
+    memory.toolFailureCount = 0
+  }
+
   status(sessionID: string): { watched: boolean; state?: WatchStatus } {
     const entry = this.watched.get(sessionID)
     if (!entry) return { watched: false }
+    const memory = this.inMemory.get(sessionID)
     return {
       watched: true,
       state: {
@@ -251,6 +298,9 @@ export class WatchStore {
         // validator rejects undefined against {type:"number"}.
         ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
         since: entry.since,
+        rejections: entry.rejections,
+        verifying: memory?.verifying ?? false,
+        toolFailureCount: memory?.toolFailureCount ?? 0,
       },
     }
   }
@@ -263,6 +313,9 @@ export class WatchStore {
       totalInjections: entry.totalInjections,
       ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
       since: entry.since,
+      rejections: entry.rejections,
+      verifying: this.inMemory.get(entry.sessionID)?.verifying ?? false,
+      toolFailureCount: this.inMemory.get(entry.sessionID)?.toolFailureCount ?? 0,
     }))
   }
 }

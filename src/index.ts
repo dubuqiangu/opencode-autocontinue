@@ -6,6 +6,7 @@ import { WatchStore } from "./state.ts"
 import { AutocontinueEngine, computeEndAt } from "./engine.ts"
 import type { EventLike } from "./events.ts"
 import { AUTOCONTINUE_RPC_CONTRACT, AUTOCONTINUE_RPC_ID } from "./rpc.ts"
+import type { WatchStatusEvent } from "./rpc.ts"
 
 // Minimal structural types matching the V2 plugin API surface we use.
 // The runtime provides these; we avoid a hard import to keep installs light.
@@ -58,12 +59,7 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   await store.hydrate()
 
   // RPC events let the TUI refresh its footer live.
-  let emitStateChanged: (
-    sessionID: string,
-    state: string,
-    injections: number,
-    totalInjections: number,
-  ) => Promise<void> = async () => {}
+  let emitStateChanged: (event: WatchStatusEvent) => Promise<void> = async () => {}
   const rpcContract = AUTOCONTINUE_RPC_CONTRACT
 
   // Construct the engine BEFORE rpcImplementation: rpcImplementation.set calls
@@ -77,8 +73,8 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
     ctx.session,
     config,
     store,
-    (sessionID, state, injections, totalInjections) => {
-      void emitStateChanged(sessionID, state, injections, totalInjections)
+    (event) => {
+      void emitStateChanged(event)
     },
     undefined,
     ctx.location?.directory,
@@ -102,12 +98,14 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
       }
       const entry = store.getState(input.sessionID)
       const state = entry?.state ?? (input.enabled ? "watching" : "stopped")
-      void emitStateChanged(
-        input.sessionID,
+      void emitStateChanged({
+        sessionID: input.sessionID,
         state,
-        entry?.injections ?? 0,
-        entry?.totalInjections ?? 0,
-      )
+        injections: entry?.injections ?? 0,
+        totalInjections: entry?.totalInjections ?? 0,
+        rejections: entry?.rejections ?? 0,
+        verifying: false,
+      })
       return { state }
     },
     async status(input: { sessionID: string }) {
@@ -121,9 +119,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   let rpcRegistration: Awaited<ReturnType<ServerContext["rpc"]["register"]>> | undefined
   try {
     rpcRegistration = await ctx.rpc.register(rpcContract, rpcImplementation)
-    emitStateChanged = async (sessionID, state, injections, totalInjections) => {
+    emitStateChanged = async (event) => {
       try {
-        await rpcRegistration?.events.emit("state.changed", { sessionID, state, injections, totalInjections })
+        await rpcRegistration?.events.emit("state.changed", { ...event })
       } catch {
         // TUI may be disconnected; footer catches up on next status check.
       }

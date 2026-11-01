@@ -40,7 +40,10 @@ var AUTOCONTINUE_RPC_CONTRACT = {
               injections: { type: "number" },
               totalInjections: { type: "number" },
               lastInjectedAt: { type: "number" },
-              since: { type: "number" }
+              since: { type: "number" },
+              rejections: { type: "number" },
+              verifying: { type: "boolean" },
+              toolFailureCount: { type: "number" }
             },
             required: ["sessionID", "state", "injections", "totalInjections", "since"],
             additionalProperties: false
@@ -68,7 +71,9 @@ var AUTOCONTINUE_RPC_CONTRACT = {
           sessionID: { type: "string" },
           state: { type: "string" },
           injections: { type: "number" },
-          totalInjections: { type: "number" }
+          totalInjections: { type: "number" },
+          rejections: { type: "number" },
+          verifying: { type: "boolean" }
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false
@@ -204,7 +209,8 @@ var tui_default = Plugin.define({
         const status = statusOf(sessionID);
         if (status === void 0) return null;
         if (status.state === "done") return "[AC \u2713]";
-        if (status.state === "stopped") return `[AC \u23F8 ${status.injections}]`;
+        if (status.state === "paused") return "[AC \u23F8]";
+        if (status.state === "stopped") return `[AC \u23F9 ${status.injections}]`;
         return "[AC \u25CF]";
       });
       return /* @__PURE__ */ jsx("text", { children: () => label() });
@@ -255,6 +261,13 @@ var tui_default = Plugin.define({
         const roundSuffix = typeof status.totalInjections === "number" && roundIn !== lifetime ? ` (${roundIn} this round)` : "";
         metricLines.push(`\u{1F504} ${lifetime} injection${lifetime === 1 ? "" : "s"}${roundSuffix}`);
         metricLines.push(`\u{1F3AF} ${status.state}`);
+        if (status.verifying) metricLines.push("\u{1F50D} verifying");
+        if (typeof status.rejections === "number" && status.rejections > 0) {
+          metricLines.push(`\u{1F6AB} ${status.rejections} rejection(s)`);
+        }
+        if (typeof status.toolFailureCount === "number" && status.toolFailureCount > 0) {
+          metricLines.push(`\u{1F6E0} ${status.toolFailureCount} tool failure(s)`);
+        }
         return metricLines.join("\n");
       });
       const muted = context.theme?.text?.muted;
@@ -386,17 +399,23 @@ var tui_default = Plugin.define({
           const state = event?.data?.state ?? event?.properties?.state;
           const injections = event?.data?.injections ?? event?.properties?.injections ?? 0;
           const totalInjections = event?.data?.totalInjections ?? event?.properties?.totalInjections;
+          const rejections = event?.data?.rejections ?? event?.properties?.rejections;
+          const verifying = event?.data?.verifying ?? event?.properties?.verifying;
+          const toolFailureCount = event?.data?.toolFailureCount ?? event?.properties?.toolFailureCount;
           if (typeof sessionID !== "string") return;
           if (state === "stopped") {
             void refreshStatus(sessionID);
-          } else if (state === "watching" || state === "confirming" || state === "done") {
+          } else if (state === "watching" || state === "confirming" || state === "paused" || state === "done") {
             const current = statusOf(sessionID);
             updateStatus(sessionID, {
               ...current ?? {},
               sessionID,
               state,
               injections,
-              ...typeof totalInjections === "number" ? { totalInjections } : {}
+              ...typeof totalInjections === "number" ? { totalInjections } : {},
+              ...typeof rejections === "number" ? { rejections } : {},
+              ...typeof verifying === "boolean" ? { verifying } : {},
+              ...typeof toolFailureCount === "number" ? { toolFailureCount } : {}
             });
           }
         });

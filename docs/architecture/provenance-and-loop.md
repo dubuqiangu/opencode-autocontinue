@@ -251,3 +251,183 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 - 本机 V2 schema 无 `message.updated`/`session.error`；引擎对应分支为死路径，
   完成检测靠 idle→`maybeInject` 兜底（延迟而非漏判）。清理留作独立后续项。
 - `docs/features/engine.md:32` 关于 `resume:true` 的描述与实现不符，本阶段一并修正。
+
+---
+
+## 7. 第二轮（v0.5.0）：dsh-pua 再比对落地
+
+> 范围裁定（用户已确认，2026-11-01）：采纳 **①–⑤ + B**。第一轮暂缓的 abort/pause 哨兵
+> 本阶段补回；#3 由「整条替换两档」改为「基础提示 + 阈值追加」。
+> 取证基线：`MichengAI/dsh-pua` `main` @ `26ed406`（v1.0.5, 2026-10-28, Apache-2.0）逐文件源码。
+> **B 的「删死路径」一项本期不做**，理由见 §7.6。
+
+### 7.1 ① 验证输出采集上限（真实缺陷）
+
+**缺陷**：`src/verify.ts` 的 `defaultSpawn` 里 `stdout += String(chunk)` / `stderr += String(chunk)`
+**无上限累积**——啰嗦命令（失败测试全量输出）可撑爆内存，且失控早于超时。
+（dsh-pua 边读边截 `maxBytes: 8192`，`runtime.ts:100-101`。）
+
+**落地**：
+
+- 新增 `const STREAM_MAX_BYTES = 8 * 1024`（**每流**上限）。
+- 新增导出纯函数
+  `export function appendBoundedCapped(buffer: string, chunk: string, maxBytes: number): string`
+  —— 拼接后按 UTF-8 字节计；超限则保留**头一半 + 尾一半**（首错与末错都不丢），
+  中间以 `\n…（输出过长，已省略中段）…\n` 连接的时间/字节不计入 `maxBytes`（截断后总字节 ≤ maxBytes）。
+- `defaultSpawn` 的两处 `+=` 改为 `stdout = appendBoundedCapped(stdout, String(chunk), STREAM_MAX_BYTES)`（stderr 同理）。
+- `runVerification` / `buildVerifyDetail` 的对外语义不变（最终仍由 `buildVerifyDetail` 做权威 8KB 头尾截断）。
+
+### 7.2 ② abort/pause 哨兵 + `paused` 状态
+
+**语义**：成对标签（对齐 dsh-pua，`runtime.ts:572-581`），判定顺序 **abort → pause → done**。
+模型可主动「放弃」（abort → 停止）或「求助」（pause → 暂停，等待用户补充后恢复）。
+
+**配置新增**（`src/config.ts`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `abortSentinelTag` | `"loop-abort"` | 成对标签名；空串禁用 |
+| `pauseSentinelTag` | `"loop-pause"` | 成对标签名；空串禁用 |
+
+**匹配**（`src/events.ts`）：
+`export function matchSentinel(text: string, tag: string): string | undefined`
+—— tag 做正则转义后构造 `` new RegExp(`<${escaped}>([\\s\\S]+?)</${escaped}>`) ``（**成对、非空** `+?`），
+返回夹注内容（`trim()`）；无 `i` 标志（对齐 dsh-pua，措辞大小写敏感）。空 tag 返回 `undefined`。
+
+**引擎接线**（`src/engine.ts` 的 `maybeInject`）：在 `latest.backgroundWorkRunning` 守卫之后、
+`cfg.verifyCommand` 闸门**之前**插入（verify 与非 verify 模式统一判定）：
+
+1. `matchSentinel(latest.text, cfg.abortSentinelTag)` 命中 → `store.markStopped` + `clearTimer` + `stopInterval` + `emit("stopped")`，**不注入**，`return`。
+2. 否则 `matchSentinel(latest.text, cfg.pauseSentinelTag)` 命中 → `store.markPaused` + `clearTimer` + `stopInterval` + `emit("paused")`，**不注入**，`return`。
+3. 只读 `latest.text`（assistant 消息）；**绝不扫描 `verify.detail`**（§3.7）。
+
+**状态**（`src/state.ts` / `src/rpc.ts`）：
+
+- `WatchState["state"]` 联合加 `"paused"`（`WatchStatus.state` 自动继承）。
+- 新增 `async markPaused(sessionID)`（`state="paused"` + persist）。
+- `hydrate`：`state: entry.state === "paused" ? "paused" : "watching"`（**保留** paused；done/stopped 仍丢弃）。
+- `resume()` 已把 state 置 `"watching"`——用户新消息经引擎 user 分支 `resume()` + `scheduleInterval()` 自然恢复。
+- `maybeInject` 顶部守卫 `entry.state !== "watching" && !== "confirming"` 对 paused 走 `stopInterval` + return（不注入），**无需额外分支**。
+
+**TUI**（`src/tui.tsx`）：
+
+- `WatchStatusView.state` 联合加 `"paused"`。
+- `FooterIndicator`：`paused` → `"[AC ⏸]"`；`stopped` → `"[AC ⏹ ${injections}]"`（**区分**暂停与停止）。
+- `SidebarStatus`：保持只渲染 `watching`/`confirming`（paused/stopped/done 由 footer 承载，不扩大范围）。
+
+### 7.3 ③ 升级提示阈值化 + 轮次压力梯
+
+**改动**：删除「整条替换的两档」`escalationMessages`（**breaking**，v0.5.0 记录），
+改为「基础提示 + 阈值追加」，对齐 dsh-pua（`runtime.ts:612-649`）。
+
+**配置**（`src/config.ts`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `escalationReassessMessage` | 见下 | `rejections >= 3` 追加 |
+| `escalationRootCauseMessage` | 见下 | `rejections >= 5` 追加 |
+| `escalationPressureLadder` | 6 档，见下 | 始终追加；按 `rejections` 在 3/7/15/30/50 分档选一行 |
+
+默认文案：
+
+- `escalationReassessMessage`: `"REASSESS：重读验证输出、搜索相关源码、列 3 个不同假设再行动。不要再用同样的方法。"`
+- `escalationRootCauseMessage`: `"你可能在解决错误的问题。退回到需求本身重新理解。"`
+- `escalationPressureLadder`（依次）：
+  1. `"稳步推进。"`
+  2. `"换方案，别原地打转。"`
+  3. `"先用 git log 看看自己做了什么，读取当前会话迭代记录。"`
+  4. `"穷尽了吗？用 git diff 确认没在重复。"`
+  5. `"停下来重新审视根因，用完全不同的思路。"`
+  6. `"退回去从需求本身重新质疑。"`
+
+**引擎**（`src/engine.ts`）：
+
+- 删除 `selectEscalationMessage`。
+- 新增 `export function selectPressureMessage(ladder: string[], rejections: number): string`
+  —— 分档 `<=3 / <=7 / <=15 / <=30 / <=50 / else`；空数组返回 `""`。
+- 新增 `export function composeRejectionPrompt(cfg: PluginConfig, rejections: number): string`：
+  ```ts
+  const lines = [cfg.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
+  const pressure = selectPressureMessage(cfg.escalationPressureLadder, rejections)
+  if (pressure) lines.push(pressure)
+  if (rejections >= 3 && cfg.escalationReassessMessage) lines.push(cfg.escalationReassessMessage)
+  if (rejections >= 5 && cfg.escalationRootCauseMessage) lines.push(cfg.escalationRootCauseMessage)
+  return lines.join("\n")
+  ```
+- `runVerifyGate` 失败分支：`const prompt = composeRejectionPrompt(cfg, rejections)`，
+  注入 `` `${prompt}\n\n${detail}` ``。
+
+### 7.4 ④ 验证状态进 TUI/RPC
+
+**契约**（`src/rpc.ts`）：
+
+- 新增 `export interface WatchStatusEvent { sessionID: string; state: WatchState["state"]; injections: number; totalInjections: number; rejections?: number; verifying?: boolean }`。
+- `WatchStatus` 加 `rejections?: number`、`verifying?: boolean`、`toolFailureCount?: number`（§7.5）。
+- `status` 输出 schema 的 `state.properties` 加 `rejections:{type:"number"}`、`verifying:{type:"boolean"}`、`toolFailureCount:{type:"number"}`（**均为可选**，不加进 `required`；`additionalProperties:false` 故必须显式声明）。
+- `state.changed` 事件 schema properties 加 `rejections:{type:"number"}`、`verifying:{type:"boolean"}`；`required` 不变。`RpcContract` 同步。
+
+**状态**（`src/state.ts`）：
+
+- `InMemoryState` 加 `verifying: boolean`（`getMemory` 初值 `false`）。
+- 新增 `isVerifying(sessionID): boolean`（读 `inMemory`）。
+- `status()` / `list()` 输出加 `rejections`、`verifying`（恒带布尔值）、`toolFailureCount`（§7.5）。
+
+**引擎**（`src/engine.ts`）：
+
+- `emitChanged` 回调签名改为 `(event: WatchStatusEvent) => void`；`emitChangedInternal` 组装
+  `{ sessionID, state, injections, totalInjections, rejections: entry?.rejections ?? 0, verifying: this.store.isVerifying(sessionID), ...(§7.5) }`。
+- `runVerifyGate`：进入验证前 `memory.verifying = true` 并 `emit` 一次（展示"正在验证"）；`finally` 置 `false`。
+
+**入口**（`src/index.ts`）：`emitStateChanged` 改收 `WatchStatusEvent`，`events.emit("state.changed", { ...event })`；
+`rpcImplementation.set` 的 emit 亦带 `rejections`（`entry.rejections`）与 `verifying: false`。
+
+**TUI**（`src/tui.tsx`）：`WatchStatusView` 加 `rejections?`/`verifying?`/`toolFailureCount?`；
+`state.changed` 监听解析并写回；`SidebarStatus` content 追加
+`verifying` → `"🔍 verifying"`、`rejections > 0` → `` `🚫 ${rejections} rejection(s)` ``（沿用现有 muted 文本风格）。
+
+### 7.5 ⑤ 工具失败观测计数器（opt-in）
+
+**语义**（对齐 dsh-pua `runtime.ts:263-279`，刻意**不是**任务失败数，只作观测）：
+去重（滚动窗口）+ 成功清零。
+
+- 配置：`observeToolFailures: boolean`（默认 **false**，opt-in）。
+- 数据源：`latestAssistantText` 扫描消息时收集**最后一个工具 part** 的 `{ id, errored }`：
+  - V2：`type==="tool"`，id 取 `part.callID ?? part.id`（防御式，缺失即视为不可去重），
+    `errored = state.status === "error"`。
+  - V1：`tool_use` 记 id；后续 `tool_result.is_error === true` 视为 errored。
+- 状态（`src/state.ts`）：`InMemoryState` 加 `toolFailureCount: number`、`toolFailureIds: string[]`；
+  新增 `observeToolOutcome(id: string | undefined, errored: boolean)`：
+  - `errored` 且 id 存在且不在窗口 → `toolFailureCount = Math.min(toolFailureCount + 1, 1_000_000)`；push id；`toolFailureIds = [...].slice(-128)`。
+  - `!errored`（终态成功）→ `toolFailureCount = 0`（**不清**窗口，防同 id 重计）。
+  - id 缺失且 `errored` → 不计数（避免重复刷计数）。
+- 引擎：`maybeInject` 取到 `latest` 后、判定前，`if (cfg.observeToolFailures) this.store.observeToolOutcome(latest.lastToolId, latest.lastToolErrored)`。
+- RPC/TUI：`WatchStatus.toolFailureCount`；侧栏 `toolFailureCount > 0` → `` `🛠 ${n} tool failure(s)` ``。
+
+> 注：V2 工具 part 的 id 字段名未由宿主文档确认，故防御式取值、缺失即不计数——该项为观测性、
+> 不参与任何完成/停止判定，形状漂移不会影响正确性。
+
+### 7.6 B 小健壮性
+
+**落地**：
+
+- **graceMs**（`src/verify.ts`）：`defaultSpawn` 超时/abort 时先温和终止再强杀。
+  `const GRACE_MS = 1_000`；新增 `stopGracefully()`：`try { child.kill() }`，
+  再 `setTimeout(killTree, GRACE_MS)` 强杀进程树；timeout/abort 改调 `stopGracefully()`。
+  `fallbackTimer` 保留（保证 Promise 一定 resolve）。
+- **范围钳制**（`src/config.ts`，对齐 dsh-pua `configuration.ts:21-32`）：
+  - `verifyTimeoutMs`: `clamp(1_000, 3_600_000)`（1s..3600s）。
+  - `verifyMaxIterations`: `clamp(0, 10_000)`。
+
+**不做（本期裁定）**：「删 V2 死路径」（`message.updated` / `session.error` / `info.role` 分支）。
+
+- 理由：`test/server.test.ts` 有 5 处用例锁定这些路径（`session.error` 1 处、`message.updated` 4 处），
+  且 `docs/decisions/changelog.md` 0.3.11 明确记录「v1 路径保留」「各 case 补 v2 别名」为**有意兼容**。
+  删除会破坏测试并回退已记录的兼容决策，收益仅「少几行」，风险与收益不匹配。
+- 若确要清理：另开一项、先征得同意，并同步更新测试与 changelog。
+
+### 7.7 验证与发布
+
+- 单测：新增 `test/verify-safety.test.ts`（① + B-grace）；扩展 `test/server.test.ts`（②–⑤ + B-clamp）。
+- TUI 构建：改动 `src/tui.tsx` 后必须 `npm run build:tui`。
+- 发布：bump `0.4.0` → `0.5.0` + changelog 新行 + 脱敏扫描（独立成步，先读输出）+ `verify-install.ps1`。
+- 实机（**重启 TUI**）：查 `opencode.db` `session_message` 新行 `type` 与 `opencode-autocontinue.watched` KV。

@@ -56,6 +56,7 @@ import {
   errorToMatchString,
   messageText,
   hasCompletionMarker,
+  matchSentinel,
   looksIncomplete,
   titleExcluded,
 } from "../src/events.ts"
@@ -140,7 +141,8 @@ import {
   computeEndAt,
   startTimeNotReached,
   retryHookHandler,
-  selectEscalationMessage,
+  selectPressureMessage,
+  composeRejectionPrompt,
 } from "../src/engine.ts"
 import { WatchStore } from "../src/state.ts"
 import {
@@ -179,8 +181,8 @@ async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
   await store.hydrate()
   const events: Array<{ sessionID: string; state: string; injections: number }> = []
   const config = () => ({ ...DEFAULT_CONFIG, ...overrides })
-  const engine = new AutocontinueEngine(session as any, config, store, (sid, state, injections) => {
-    events.push({ sessionID: sid, state, injections })
+  const engine = new AutocontinueEngine(session as any, config, store, (event) => {
+    events.push({ sessionID: event.sessionID, state: event.state, injections: event.injections })
   })
   return { session, store, engine, events }
 }
@@ -316,8 +318,8 @@ test("completion marker with final check enabled runs the review round, not done
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
-    events.push(state)
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
   })
   await store.watch("ses_4")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_4" })
@@ -338,8 +340,8 @@ test("completion marker with a running background subagent stays watching (no do
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
-    events.push(state)
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
   })
   await store.watch("ses_guard")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_guard" })
@@ -361,8 +363,8 @@ test("completion marker with a finished background subagent confirms normally", 
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
-    events.push(state)
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
   })
   await store.watch("ses_guard2")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_guard2" })
@@ -500,8 +502,8 @@ test("v2 message shape: completion marker is detected via content", async () => 
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
-    events.push(state)
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
   })
   await store.watch("ses_v2_marker")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_marker" })
@@ -885,8 +887,8 @@ test("completion marker with final check injects the review message then confirm
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
-    events.push(state)
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
   })
   await store.watch("ses_fc1")
   await engine.maybeInject("ses_fc1")
@@ -905,8 +907,8 @@ test("second completion marker while confirming marks done", async () => {
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (_, state) => {
-    events.push(state)
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+    events.push(event.state)
   })
   await store.watch("ses_fc2")
   await store.beginConfirming("ses_fc2")
@@ -929,7 +931,7 @@ test("completion marker with final check disabled marks done immediately", async
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, finalCheckEnabled: false }),
     store,
-    (_, state) => events.push(state),
+    (event) => events.push(event.state),
   )
   await store.watch("ses_fc3")
   await engine.maybeInject("ses_fc3")
@@ -1067,8 +1069,8 @@ test("confirming does not mark done while the old marker message is still latest
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
     store,
-    (_sid, state) => {
-      events.push(state)
+    (event) => {
+      events.push(event.state)
     },
   )
   await store.watch("ses_b1")
@@ -1099,8 +1101,8 @@ test("confirming review reply without marker returns to watching (B2)", async ()
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
     store,
-    (_sid, state) => {
-      events.push(state)
+    (event) => {
+      events.push(event.state)
     },
   )
   await store.watch("ses_b2")
@@ -1130,8 +1132,8 @@ test("confirming second marker in a NEW assistant message marks done (B1 positiv
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
     store,
-    (_sid, state) => {
-      events.push(state)
+    (event) => {
+      events.push(event.state)
     },
   )
   await store.watch("ses_b3")
@@ -1430,13 +1432,37 @@ test("buildVerifyDetail adds the untrusted notice, cleans output, and caps at 8K
   assert.ok(Buffer.from(bigDetail, "utf8").length <= 8 * 1024)
 })
 
-test("selectEscalationMessage buckets by rejection count and sticks at the last", () => {
-  const buckets = ["first", "second"]
-  assert.equal(selectEscalationMessage(buckets, 0), "first")
-  assert.equal(selectEscalationMessage(buckets, 2), "first")
-  assert.equal(selectEscalationMessage(buckets, 3), "second")
-  assert.equal(selectEscalationMessage(buckets, 99), "second")
-  assert.equal(selectEscalationMessage([], 5), "")
+test("selectPressureMessage maps rejection tiers 3/7/15/30/50/else and clamps/empties", () => {
+  const ladder = ["t0", "t1", "t2", "t3", "t4", "t5"]
+  assert.equal(selectPressureMessage(ladder, 0), "t0")
+  assert.equal(selectPressureMessage(ladder, 3), "t0")
+  assert.equal(selectPressureMessage(ladder, 4), "t1")
+  assert.equal(selectPressureMessage(ladder, 7), "t1")
+  assert.equal(selectPressureMessage(ladder, 8), "t2")
+  assert.equal(selectPressureMessage(ladder, 15), "t2")
+  assert.equal(selectPressureMessage(ladder, 16), "t3")
+  assert.equal(selectPressureMessage(ladder, 30), "t3")
+  assert.equal(selectPressureMessage(ladder, 31), "t4")
+  assert.equal(selectPressureMessage(ladder, 50), "t4")
+  assert.equal(selectPressureMessage(ladder, 51), "t5")
+  assert.equal(selectPressureMessage(ladder, 999), "t5")
+  // A shorter ladder clamps to its last row; an empty ladder yields "".
+  assert.equal(selectPressureMessage(["only"], 99), "only")
+  assert.equal(selectPressureMessage([], 5), "")
+})
+
+test("composeRejectionPrompt layers message, pressure, reassess and root cause", () => {
+  const atZero = composeRejectionPrompt({ ...DEFAULT_CONFIG, escalationPressureLadder: [] }, 0)
+  assert.equal(atZero, `${DEFAULT_CONFIG.message}\n🚫 验证未通过（连续第 0 次）。`)
+  const atThree = composeRejectionPrompt({ ...DEFAULT_CONFIG, escalationPressureLadder: [] }, 3)
+  assert.ok(atThree.includes(DEFAULT_CONFIG.escalationReassessMessage))
+  assert.ok(!atThree.includes(DEFAULT_CONFIG.escalationRootCauseMessage))
+  const atFive = composeRejectionPrompt({ ...DEFAULT_CONFIG, escalationPressureLadder: [] }, 5)
+  assert.ok(atFive.includes(DEFAULT_CONFIG.escalationReassessMessage))
+  assert.ok(atFive.includes(DEFAULT_CONFIG.escalationRootCauseMessage))
+  // With the default ladder a pressure row is always present.
+  const withLadder = composeRejectionPrompt(DEFAULT_CONFIG, 1)
+  assert.ok(withLadder.includes(DEFAULT_CONFIG.escalationPressureLadder[0] ?? ""))
 })
 
 test("doneSentinel is part of the default completion markers", () => {
@@ -1444,19 +1470,40 @@ test("doneSentinel is part of the default completion markers", () => {
   assert.ok(matcher?.test("收尾 <promise>LOOP_DONE</promise>"))
 })
 
-test("mergeConfig clamps verify keys and replaces escalationMessages", () => {
+test("mergeConfig clamps verify keys and merges the new escalation keys", () => {
   const merged = mergeConfig(DEFAULT_CONFIG, {
     verifyCommand: "npm test",
     verifyTimeoutMs: 10,
     verifyMaxIterations: -3,
-    escalationMessages: ["only"],
+    escalationPressureLadder: ["only"],
+    escalationReassessMessage: "re",
+    escalationRootCauseMessage: "rc",
+    abortSentinelTag: "",
+    pauseSentinelTag: "my-pause",
+    observeToolFailures: true,
   })
   assert.equal(merged.verifyCommand, "npm test")
   assert.equal(merged.verifyTimeoutMs, 1_000)
   assert.equal(merged.verifyMaxIterations, 0)
-  assert.deepEqual(merged.escalationMessages, ["only"])
-  assert.deepEqual(mergeConfig(DEFAULT_CONFIG, { escalationMessages: [] }).escalationMessages, [])
+  assert.deepEqual(merged.escalationPressureLadder, ["only"])
+  assert.equal(merged.escalationReassessMessage, "re")
+  assert.equal(merged.escalationRootCauseMessage, "rc")
+  assert.equal(merged.abortSentinelTag, "") // empty disables the sentinel
+  assert.equal(merged.pauseSentinelTag, "my-pause")
+  assert.equal(merged.observeToolFailures, true)
   assert.equal(mergeConfig(DEFAULT_CONFIG, {}).selfEchoWindowMs, 10_000)
+})
+
+test("mergeConfig defaults for the new keys and clamps upper bounds", () => {
+  const defaults = mergeConfig(DEFAULT_CONFIG, {})
+  assert.equal(defaults.abortSentinelTag, "loop-abort")
+  assert.equal(defaults.pauseSentinelTag, "loop-pause")
+  assert.equal(defaults.escalationPressureLadder.length, 6)
+  assert.deepEqual(defaults.escalationPressureLadder, DEFAULT_CONFIG.escalationPressureLadder)
+  assert.equal(defaults.observeToolFailures, false)
+  // Upper bounds mirror the lower-bound clamps.
+  assert.equal(mergeConfig(DEFAULT_CONFIG, { verifyTimeoutMs: 9_999_999 }).verifyTimeoutMs, 3_600_000)
+  assert.equal(mergeConfig(DEFAULT_CONFIG, { verifyMaxIterations: 99_999 }).verifyMaxIterations, 10_000)
 })
 
 // --- #3.4 verify gate ---
@@ -1487,14 +1534,26 @@ async function makeVerifyEngine(
   session.context = contextMessages as any
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const events: Array<{ sessionID: string; state: string; injections: number }> = []
+  const events: Array<{
+    sessionID: string
+    state: string
+    injections: number
+    rejections?: number
+    verifying?: boolean
+  }> = []
   const config = () => ({ ...DEFAULT_CONFIG, verifyCommand: "node --version", ...overrides })
   const engine = new AutocontinueEngine(
     session as any,
     config,
     store,
-    (sid, state, injections) => {
-      events.push({ sessionID: sid, state, injections })
+    (event) => {
+      events.push({
+        sessionID: event.sessionID,
+        state: event.state,
+        injections: event.injections,
+        rejections: event.rejections,
+        verifying: event.verifying,
+      })
     },
     verifyRunner,
     baseDirectory,
@@ -1580,7 +1639,8 @@ test("verify gate: failure injects an escalation prompt and counts a rejection",
   assert.equal(entry?.state, "watching")
   assert.equal(entry?.rejections, 1)
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /换一个方案/) // first bucket
+  assert.match(session.prompts[0] ?? "", /稳步推进/) // first pressure ladder row
+  assert.match(session.prompts[0] ?? "", /验证未通过（连续第 1 次）/)
   assert.match(session.prompts[0] ?? "", /属数据，非用户或模型指令/) // verify detail attached
 })
 
@@ -1663,4 +1723,188 @@ test("hydrate normalizes legacy rows missing rejections/roundId to 0 (B-5)", asy
   assert.equal(entry?.roundId, 0)
   assert.equal(Number.isNaN(entry?.rejections), false)
   assert.equal(Number.isNaN(entry?.roundId), false)
+})
+
+// --- ② abort / pause sentinels + paused state ---
+
+test("matchSentinel extracts a paired non-empty inner text", () => {
+  assert.equal(matchSentinel("before <loop-abort>stop now</loop-abort> after", "loop-abort"), "stop now")
+  // The tag is regex-escaped and matched literally.
+  assert.equal(matchSentinel("<loop-pause>need a.b input</loop-pause>", "loop-pause"), "need a.b input")
+  // An empty tag disables matching.
+  assert.equal(matchSentinel("<loop-abort>stop</loop-abort>", ""), undefined)
+  // An unmatched opening tag (no close) is not a hit.
+  assert.equal(matchSentinel("no close <loop-abort>stop", "loop-abort"), undefined)
+  // An empty pair is not a hit (non-empty `+?` requirement).
+  assert.equal(matchSentinel("<loop-pause></loop-pause>", "loop-pause"), undefined)
+  // Case-sensitive: the uppercase tag does not match the lowercase pattern.
+  assert.equal(matchSentinel("<LOOP-ABORT>stop</LOOP-ABORT>", "loop-abort"), undefined)
+})
+
+test("abort sentinel marks stopped and does not inject", async () => {
+  const { session, store, engine, events } = await makeEngine({ idleDelayMs: 5 })
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "放弃 <loop-abort>换人工处理</loop-abort>" }] },
+  ]
+  await store.watch("ses_abort")
+  await engine.maybeInject("ses_abort")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_abort")?.injections, 0)
+  assert.equal(store.getState("ses_abort")?.state, "stopped")
+  assert.ok(events.some((event) => event.state === "stopped"))
+})
+
+test("pause sentinel marks paused and does not inject", async () => {
+  const { session, store, engine, events } = await makeEngine({ idleDelayMs: 5 })
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "需要确认 <loop-pause>请补充需求</loop-pause>" }] },
+  ]
+  await store.watch("ses_pause")
+  await engine.maybeInject("ses_pause")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_pause")?.injections, 0)
+  assert.equal(store.getState("ses_pause")?.state, "paused")
+  assert.ok(events.some((event) => event.state === "paused"))
+})
+
+test("paused entry: maybeInject does not inject; a real user message resumes it", async () => {
+  const { session, store, engine } = await makeEngine({ idleDelayMs: 5 })
+  await store.watch("ses_paused_resume")
+  await store.markPaused("ses_paused_resume")
+  await engine.maybeInject("ses_paused_resume")
+  assert.equal(session.prompts.length, 0)
+  assert.equal(store.getState("ses_paused_resume")?.state, "paused")
+  // A real user message flips it back to watching and re-arms the interval.
+  let scheduleCalls = 0
+  const originalSchedule = engine.scheduleInterval.bind(engine)
+  engine.scheduleInterval = (sessionID: string) => {
+    scheduleCalls += 1
+    return originalSchedule(sessionID)
+  }
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_paused_resume",
+    data: { item: { type: "user" } },
+  })
+  assert.equal(store.getState("ses_paused_resume")?.state, "watching")
+  assert.equal(scheduleCalls, 1)
+  engine.stopInterval("ses_paused_resume")
+})
+
+test("hydrate preserves a paused row and drops done/stopped", async () => {
+  const storage = new FakeStorage() as any
+  await storage.set("opencode-autocontinue.watched", {
+    ses_paused: { sessionID: "ses_paused", state: "paused", injections: 1, totalInjections: 1, since: 1_000, endAt: 0 },
+    ses_done2: { sessionID: "ses_done2", state: "done", injections: 1, since: 1_000, endAt: 0 },
+  })
+  const store = new WatchStore(storage)
+  await store.hydrate()
+  assert.equal(store.status("ses_paused").watched, true)
+  assert.equal(store.status("ses_paused").state?.state, "paused")
+  assert.equal(store.status("ses_done2").watched, false)
+})
+
+// --- ④ verify status into RPC/TUI ---
+
+test("status()/list() expose rejections, verifying and toolFailureCount", async () => {
+  const { store } = await makeEngine()
+  await store.watch("ses_rpc_status")
+  await store.recordRejection("ses_rpc_status")
+  const status = store.status("ses_rpc_status")
+  assert.equal(status.state?.rejections, 1)
+  assert.equal(status.state?.verifying, false)
+  assert.equal(status.state?.toolFailureCount, 0)
+  const listed = store.list().find((entry) => entry.sessionID === "ses_rpc_status")
+  assert.equal(listed?.rejections, 1)
+  assert.equal(listed?.verifying, false)
+  assert.equal(listed?.toolFailureCount, 0)
+})
+
+test("verify gate emits verifying:true while the command runs", async () => {
+  let releaseRunner: () => void = () => {}
+  let runnerStarted: () => void = () => {}
+  const runnerGate = new Promise<void>((resolve) => {
+    releaseRunner = resolve
+  })
+  const startedGate = new Promise<void>((resolve) => {
+    runnerStarted = resolve
+  })
+  const { store, engine, events } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => {
+      runnerStarted()
+      await runnerGate
+      return passVerifyResult()
+    },
+    { minIntervalMs: 0 },
+  )
+  await store.watch("ses_verifying")
+  const inflight = engine.maybeInject("ses_verifying")
+  await startedGate
+  assert.ok(events.some((event) => event.verifying === true))
+  assert.equal(store.isVerifying("ses_verifying"), true)
+  releaseRunner()
+  await inflight
+  assert.equal(store.isVerifying("ses_verifying"), false)
+  assert.equal(store.getState("ses_verifying")?.state, "done")
+})
+
+// --- ⑤ tool-failure observation counter (opt-in) ---
+
+test("observeToolFailures defaults to false", () => {
+  assert.equal(DEFAULT_CONFIG.observeToolFailures, false)
+})
+
+test("observeToolOutcome dedups failures, slices the window and clears on success", async () => {
+  const { store } = await makeEngine()
+  await store.watch("ses_tool_obs")
+  store.observeToolOutcome("ses_tool_obs", "tool_1", true)
+  store.observeToolOutcome("ses_tool_obs", "tool_1", true) // same id: not double-counted
+  assert.equal(store.status("ses_tool_obs").state?.toolFailureCount, 1)
+  store.observeToolOutcome("ses_tool_obs", "tool_2", true)
+  assert.equal(store.status("ses_tool_obs").state?.toolFailureCount, 2)
+  // A terminal success clears the count but keeps the window.
+  store.observeToolOutcome("ses_tool_obs", undefined, false)
+  assert.equal(store.status("ses_tool_obs").state?.toolFailureCount, 0)
+  // tool_1 is still in the window: re-failing it does not re-count.
+  store.observeToolOutcome("ses_tool_obs", "tool_1", true)
+  assert.equal(store.status("ses_tool_obs").state?.toolFailureCount, 0)
+  // An errored outcome without an id is not counted.
+  store.observeToolOutcome("ses_tool_obs", undefined, true)
+  assert.equal(store.status("ses_tool_obs").state?.toolFailureCount, 0)
+})
+
+test("observeToolOutcome keeps only the last 128 failed ids in the window", async () => {
+  const { store } = await makeEngine()
+  await store.watch("ses_tool_window")
+  for (let index = 0; index < 130; index++) {
+    store.observeToolOutcome("ses_tool_window", `tool_${index}`, true)
+  }
+  const memory = store.getMemory("ses_tool_window")
+  assert.equal(memory.toolFailureIds.length, 128)
+  assert.equal(memory.toolFailureIds[0], "tool_2")
+  assert.equal(memory.toolFailureCount, 130)
+})
+
+test("engine observes the last tool failure only when observeToolFailures is enabled", async () => {
+  const errorContext = async () => [
+    {
+      type: "assistant",
+      content: [
+        { type: "text", text: "继续推进" },
+        { type: "tool", callID: "call_x", state: { status: "error" } },
+      ],
+    },
+  ]
+  const disabled = await makeEngine({ idleDelayMs: 5 })
+  disabled.session.context = errorContext
+  await disabled.store.watch("ses_tool_disabled")
+  await disabled.engine.maybeInject("ses_tool_disabled")
+  assert.equal(disabled.store.status("ses_tool_disabled").state?.toolFailureCount, 0)
+
+  const enabled = await makeEngine({ idleDelayMs: 5, observeToolFailures: true })
+  enabled.session.context = errorContext
+  await enabled.store.watch("ses_tool_enabled")
+  await enabled.engine.maybeInject("ses_tool_enabled")
+  assert.equal(enabled.store.status("ses_tool_enabled").state?.toolFailureCount, 1)
 })

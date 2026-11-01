@@ -91,6 +91,18 @@ export function hasCompletionMarker(text: string, matcher: RegExp | null): boole
   return matcher.test(text)
 }
 
+/** Extract the trimmed inner text of a PAIRED sentinel tag: tag "loop-abort"
+ *  matches `<loop-abort>…</loop-abort>`. The tag is regex-escaped so it is
+ *  matched literally, the pair must be non-empty (`+?`), and matching is
+ *  case-sensitive (no `i` flag, aligning with dsh-pua). Returns undefined when
+ *  the tag is empty or the text carries no non-empty pair. */
+export function matchSentinel(text: string, tag: string): string | undefined {
+  if (!tag) return undefined
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const match = new RegExp(`<${escaped}>([\\s\\S]+?)</${escaped}>`).exec(text)
+  return match ? match[1].trim() : undefined
+}
+
 // Short acknowledgement phrases (C) that indicate the model is waiting for
 // instructions rather than having finished the task.
 const ACK_WORDS = new Set([

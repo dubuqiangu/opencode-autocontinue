@@ -23,13 +23,14 @@ import {
   hasCompletionMarker,
   isRetryableError,
   looksIncomplete,
+  matchSentinel,
   messageText,
   idleOutcomeFromEvent,
   sessionIDFromEvent,
   sessionIDFromMessageInfo,
   titleExcluded,
 } from "./events.ts"
-import type { WatchState } from "./rpc.ts"
+import type { WatchState, WatchStatusEvent } from "./rpc.ts"
 import { buildVerifyDetail, runVerification, verificationArgv } from "./verify.ts"
 import type { SpawnSpec, VerifyResult } from "./verify.ts"
 
@@ -121,26 +122,43 @@ export function retryHookHandler(
   _event.decision = { retry: true, delay }
 }
 
-/** Pick the escalation prompt bucket for the current failure count.
- *  `index = min(len - 1, floor(rejections / 3))` — the first bucket covers the
- *  first three failures, then it steps up; the last bucket sticks. An empty
- *  list returns "" so the caller can fall back to `message`. */
-export function selectEscalationMessage(messages: string[], rejections: number): string {
-  if (messages.length === 0) return ""
-  const index = Math.min(messages.length - 1, Math.floor(Math.max(0, rejections) / 3))
-  return messages[index] ?? ""
+/** Pick the pressure-ladder row for the current rejection count.
+ *  Tiers: `<=3 / <=7 / <=15 / <=30 / <=50 / else` map to rows 0..5. A shorter
+ *  ladder clamps to its last row; an empty ladder returns "" (no pressure line). */
+export function selectPressureMessage(ladder: string[], rejections: number): string {
+  if (ladder.length === 0) return ""
+  const lastIndex = ladder.length - 1
+  const tier =
+    rejections <= 3
+      ? 0
+      : rejections <= 7
+        ? 1
+        : rejections <= 15
+          ? 2
+          : rejections <= 30
+            ? 3
+            : rejections <= 50
+              ? 4
+              : 5
+  return ladder[Math.min(tier, lastIndex)] ?? ""
+}
+
+/** Compose the verify-failure prompt: base message + failure count, then the
+ *  pressure-ladder row, then the reassess (>=3) and root-cause (>=5) additions. */
+export function composeRejectionPrompt(cfg: PluginConfig, rejections: number): string {
+  const lines = [cfg.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
+  const pressure = selectPressureMessage(cfg.escalationPressureLadder, rejections)
+  if (pressure) lines.push(pressure)
+  if (rejections >= 3 && cfg.escalationReassessMessage) lines.push(cfg.escalationReassessMessage)
+  if (rejections >= 5 && cfg.escalationRootCauseMessage) lines.push(cfg.escalationRootCauseMessage)
+  return lines.join("\n")
 }
 
 export class AutocontinueEngine {
   private readonly session: SessionLike
   private readonly config: () => PluginConfig
   private readonly store: WatchStore
-  private readonly emitChanged: (
-    sessionID: string,
-    state: WatchState["state"],
-    injections: number,
-    totalInjections: number,
-  ) => void
+  private readonly emitChanged: (event: WatchStatusEvent) => void
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Per-session interval timers (periodic re-checks). */
   private readonly intervalTimers = new Map<string, ReturnType<typeof setInterval>>()
@@ -167,12 +185,7 @@ export class AutocontinueEngine {
     session: SessionLike,
     config: () => PluginConfig,
     store: WatchStore,
-    emitChanged: (
-      sessionID: string,
-      state: WatchState["state"],
-      injections: number,
-      totalInjections: number,
-    ) => void,
+    emitChanged: (event: WatchStatusEvent) => void,
     verifyRunner?: (spec: SpawnSpec) => Promise<VerifyResult>,
     baseDirectory?: string,
   ) {
@@ -322,6 +335,11 @@ export class AutocontinueEngine {
     const controller = new AbortController()
     memory.activeVerifyAbort = controller
     this.activeVerifyControllers.set(sessionID, controller)
+    // Surface "verifying" to the TUI before awaiting the command; cleared in
+    // the finally below. The post-result emitChangedInternal calls carry the
+    // cleared value.
+    memory.verifying = true
+    void this.emitChangedInternal(sessionID, entry.state)
     let outcome: VerifyResult
     try {
       outcome = await this.verifyRunner({
@@ -331,6 +349,7 @@ export class AutocontinueEngine {
         signal: controller.signal,
       })
     } finally {
+      memory.verifying = false
       this.activeVerifyControllers.delete(sessionID)
       if (memory.activeVerifyAbort === controller) memory.activeVerifyAbort = undefined
     }
@@ -365,9 +384,9 @@ export class AutocontinueEngine {
       return
     }
 
-    const escalation = selectEscalationMessage(cfg.escalationMessages, rejections) || cfg.message
+    const prompt = composeRejectionPrompt(cfg, rejections)
     const detail = buildVerifyDetail(cfg.verifyCommand, outcome)
-    await this.injectAndRecord(memory, sessionID, `${escalation}\n\n${detail}`, after.endAt ?? 0)
+    await this.injectAndRecord(memory, sessionID, `${prompt}\n\n${detail}`, after.endAt ?? 0)
     await this.store.recordInjection(sessionID)
     void this.emitChangedInternal(sessionID, "watching")
   }
@@ -455,11 +474,36 @@ export class AutocontinueEngine {
       const latest = await this.latestAssistantText(sessionID)
       const hasMarker = hasCompletionMarker(latest.text, matcher)
 
+      // Opt-in tool-failure observation (observation only; never affects the
+      // completion/stop decision) — recorded before any branch.
+      if (cfg.observeToolFailures) {
+        this.store.observeToolOutcome(sessionID, latest.lastToolId, latest.lastToolErrored)
+      }
+
       // User's guard: if a background subagent/task is still running, do NOT
       // mark done and do NOT inject a continuation — the overall task is not
       // complete until the background work settles. Keep watching so the next
       // trigger re-checks once the subagent finishes.
       if (latest.backgroundWorkRunning) return
+
+      // Abort / pause sentinels (paired tags in the assistant text, shared by
+      // verify and non-verify modes). Only the assistant text is scanned — the
+      // verify command's output (verify.detail) is untrusted data and is never
+      // consulted for control flow (§3.7).
+      if (matchSentinel(latest.text, cfg.abortSentinelTag)) {
+        await this.store.markStopped(sessionID)
+        this.clearTimer(sessionID)
+        this.stopInterval(sessionID)
+        void this.emitChangedInternal(sessionID, "stopped")
+        return
+      }
+      if (matchSentinel(latest.text, cfg.pauseSentinelTag)) {
+        await this.store.markPaused(sessionID)
+        this.clearTimer(sessionID)
+        this.stopInterval(sessionID)
+        void this.emitChangedInternal(sessionID, "paused")
+        return
+      }
 
       // Verify mode replaces the marker / final-check flow entirely: the
       // outcome is judged only by the configured command (see runVerifyGate).
@@ -542,6 +586,10 @@ export class AutocontinueEngine {
     parts: unknown
     assistantCount: number
     backgroundWorkRunning: boolean
+    /** Id of the LAST tool part seen (`callID ?? id`), for the opt-in failure counter. */
+    lastToolId: string | undefined
+    /** Whether that last tool part ended in an error. */
+    lastToolErrored: boolean
   }> {
     try {
       // V1 messages carry { info: { role }, parts }, V2 carry
@@ -555,6 +603,8 @@ export class AutocontinueEngine {
       let latestText = ""
       let latestParts: unknown = undefined
       let backgroundWorkRunning = false
+      let lastToolId: string | undefined
+      let lastToolErrored = false
       for (const message of messages) {
         const role = (message as { info?: { role?: string } }).info?.role
         const type = (message as { type?: string }).type
@@ -564,6 +614,26 @@ export class AutocontinueEngine {
           const content = (message as { content?: unknown }).content
           latestText = messageText(parts) || messageText(content)
           latestParts = parts ?? content
+          // Record the LAST tool part so the opt-in failure counter can observe
+          // its outcome. V2: { type:"tool", callID?, id?, state:{status} }.
+          // V1: tool_use records its id; a later tool_result with is_error
+          // resolves whether it errored.
+          const partList = Array.isArray(latestParts) ? latestParts : []
+          for (const part of partList) {
+            if (!part || typeof part !== "object") continue
+            const partType = (part as { type?: string }).type
+            if (partType === "tool") {
+              const toolPart = part as { callID?: string; id?: string; state?: { status?: string } }
+              lastToolId = toolPart.callID ?? toolPart.id
+              lastToolErrored = toolPart.state?.status === "error"
+            } else if (partType === "tool_use") {
+              const toolUsePart = part as { callID?: string; id?: string }
+              lastToolId = toolUsePart.callID ?? toolUsePart.id
+              lastToolErrored = false
+            } else if (partType === "tool_result") {
+              if ((part as { is_error?: boolean }).is_error === true) lastToolErrored = true
+            }
+          }
         }
         // Background subagent/task in flight: a synthetic message whose metadata
         // says it is a subagent and has no terminal state yet means the overall
@@ -586,11 +656,25 @@ export class AutocontinueEngine {
           }
         }
       }
-      return { text: latestText, parts: latestParts, assistantCount, backgroundWorkRunning }
+      return {
+        text: latestText,
+        parts: latestParts,
+        assistantCount,
+        backgroundWorkRunning,
+        lastToolId,
+        lastToolErrored,
+      }
     } catch {
       // Fall through to empty.
     }
-    return { text: "", parts: undefined, assistantCount: 0, backgroundWorkRunning: false }
+    return {
+      text: "",
+      parts: undefined,
+      assistantCount: 0,
+      backgroundWorkRunning: false,
+      lastToolId: undefined,
+      lastToolErrored: false,
+    }
   }
 
   private async resolveTitle(sessionID: string): Promise<string | undefined> {
@@ -616,7 +700,14 @@ export class AutocontinueEngine {
 
   private async emitChangedInternal(sessionID: string, state: WatchState["state"]): Promise<void> {
     const entry = this.store.getState(sessionID)
-    this.emitChanged(sessionID, state, entry?.injections ?? 0, entry?.totalInjections ?? 0)
+    this.emitChanged({
+      sessionID,
+      state,
+      injections: entry?.injections ?? 0,
+      totalInjections: entry?.totalInjections ?? 0,
+      rejections: entry?.rejections ?? 0,
+      verifying: this.store.isVerifying(sessionID),
+    })
   }
 
   /** Handle a single server event. */

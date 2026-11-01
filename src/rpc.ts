@@ -54,6 +54,9 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
               totalInjections: { type: "number" },
               lastInjectedAt: { type: "number" },
               since: { type: "number" },
+              rejections: { type: "number" },
+              verifying: { type: "boolean" },
+              toolFailureCount: { type: "number" },
             },
             required: ["sessionID", "state", "injections", "totalInjections", "since"],
             additionalProperties: false,
@@ -82,6 +85,8 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
           state: { type: "string" },
           injections: { type: "number" },
           totalInjections: { type: "number" },
+          rejections: { type: "number" },
+          verifying: { type: "boolean" },
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false,
@@ -103,14 +108,13 @@ export interface WatchState {
   lastInjectedAt?: number
   /** End of the current watch window (epoch ms). 0 = no window. Set at watch/resume time. */
   endAt?: number
-  /** Failing verification rounds in the current round (verify-driven loop).
-   *  INTERNAL: not exposed via status()/list() (avoids RPC schema churn). */
+  /** Failing verification rounds in the current round (verify-driven loop). */
   rejections: number
   /** Monotonic round identifier. Bumped by resume(); initialized by watch().
    *  Used to discard a verification result that belongs to a superseded round.
    *  INTERNAL: not exposed via status()/list(). */
   roundId: number
-  state: "watching" | "confirming" | "stopped" | "done"
+  state: "watching" | "confirming" | "stopped" | "paused" | "done"
 }
 
 export interface WatchStatus {
@@ -122,6 +126,23 @@ export interface WatchStatus {
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (for the sidebar timer). */
   since: number
+  /** Failing verification rounds in the current round (verify-driven loop). */
+  rejections?: number
+  /** True while an independent verification command is running for this session. */
+  verifying?: boolean
+  /** Observed distinct tool failures in the current round (opt-in, observation only). */
+  toolFailureCount?: number
+}
+
+/** Payload of a live `state.changed` event: everything the TUI footer / sidebar
+ *  needs to refresh without a follow-up status() round-trip. */
+export interface WatchStatusEvent {
+  sessionID: string
+  state: WatchState["state"]
+  injections: number
+  totalInjections: number
+  rejections?: number
+  verifying?: boolean
 }
 
 export interface RpcContract {
@@ -148,6 +169,8 @@ export interface RpcContract {
           state: { type: "string" }
           injections: { type: "number" }
           totalInjections: { type: "number" }
+          rejections: { type: "number" }
+          verifying: { type: "boolean" }
         }
         required: ["sessionID", "state", "injections", "totalInjections"]
         additionalProperties: false

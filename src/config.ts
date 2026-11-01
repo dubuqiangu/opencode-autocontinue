@@ -55,9 +55,20 @@ export interface PluginConfig {
   /** Self-echo window (ms): an inbound user message equal to our last injected
    *  text within this window is treated as our own echo, not a real user turn. */
   selfEchoWindowMs: number
-  /** Escalating continuation prompts picked by failure bucket. Empty = fall back
-   *  to `message`. */
-  escalationMessages: string[]
+  /** Paired abort sentinel tag (e.g. <loop-abort>stop</loop-abort>). Empty disables. */
+  abortSentinelTag: string
+  /** Paired pause sentinel tag (e.g. <loop-pause>need input</loop-pause>). Empty disables. */
+  pauseSentinelTag: string
+  /** Extra prompt appended once rejections >= 3 (reassess before acting). */
+  escalationReassessMessage: string
+  /** Extra prompt appended once rejections >= 5 (question the root cause). */
+  escalationRootCauseMessage: string
+  /** Pressure ladder appended on every rejection; a row is picked by rejection
+   *  count. Empty = no pressure line. */
+  escalationPressureLadder: string[]
+  /** Opt-in tool-failure observation counter (observation only, never affects
+   *  completion/stop decisions). */
+  observeToolFailures: boolean
 }
 
 export const DEFAULT_CONFIG: PluginConfig = {
@@ -102,10 +113,20 @@ export const DEFAULT_CONFIG: PluginConfig = {
   verifyMaxIterations: 0,
   verifyCwd: "",
   selfEchoWindowMs: 10_000,
-  escalationMessages: [
-    "稳步推进既定计划，避免重复劳动；若当前方案反复不通过，换一个方案，不要在同一处打转。",
-    "用 `git log` / `git diff` 核对已改动，重新审视根因——你可能在解错的问题；必要时回到最初需求确认验收标准。",
+  abortSentinelTag: "loop-abort",
+  pauseSentinelTag: "loop-pause",
+  escalationReassessMessage:
+    "REASSESS：重读验证输出、搜索相关源码、列 3 个不同假设再行动。不要再用同样的方法。",
+  escalationRootCauseMessage: "你可能在解决错误的问题。退回到需求本身重新理解。",
+  escalationPressureLadder: [
+    "稳步推进。",
+    "换方案，别原地打转。",
+    "先用 git log 看看自己做了什么，读取当前会话迭代记录。",
+    "穷尽了吗？用 git diff 确认没在重复。",
+    "停下来重新审视根因，用完全不同的思路。",
+    "退回去从需求本身重新质疑。",
   ],
+  observeToolFailures: false,
 }
 
 /** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
@@ -214,22 +235,34 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   }
   if (typeof overrides.verifyCommand === "string") merged.verifyCommand = overrides.verifyCommand
   if (typeof overrides.verifyTimeoutMs === "number") {
-    merged.verifyTimeoutMs = Math.max(1_000, overrides.verifyTimeoutMs)
+    // Clamp 1s..3600s (对齐 dsh-pua configuration.ts:21-32).
+    merged.verifyTimeoutMs = Math.min(3_600_000, Math.max(1_000, overrides.verifyTimeoutMs))
   }
   if (typeof overrides.verifyMaxIterations === "number") {
-    merged.verifyMaxIterations = Math.max(0, overrides.verifyMaxIterations)
+    // Clamp 0..10000 (0 = unlimited).
+    merged.verifyMaxIterations = Math.min(10_000, Math.max(0, overrides.verifyMaxIterations))
   }
   if (typeof overrides.verifyCwd === "string") merged.verifyCwd = overrides.verifyCwd
   if (typeof overrides.selfEchoWindowMs === "number") {
     merged.selfEchoWindowMs = Math.max(0, overrides.selfEchoWindowMs)
   }
+  // Sentinel tags accept any string, including "" (which disables the sentinel).
+  if (typeof overrides.abortSentinelTag === "string") merged.abortSentinelTag = overrides.abortSentinelTag
+  if (typeof overrides.pauseSentinelTag === "string") merged.pauseSentinelTag = overrides.pauseSentinelTag
+  if (typeof overrides.escalationReassessMessage === "string") {
+    merged.escalationReassessMessage = overrides.escalationReassessMessage
+  }
+  if (typeof overrides.escalationRootCauseMessage === "string") {
+    merged.escalationRootCauseMessage = overrides.escalationRootCauseMessage
+  }
   // A provided array replaces the default (never concatenated); an explicit
-  // empty array is honored so `escalationMessages: []` falls back to `message`.
-  if (Array.isArray(overrides.escalationMessages)) {
-    merged.escalationMessages = overrides.escalationMessages.filter(
+  // empty array is honored so `escalationPressureLadder: []` disables the line.
+  if (Array.isArray(overrides.escalationPressureLadder)) {
+    merged.escalationPressureLadder = overrides.escalationPressureLadder.filter(
       (prompt): prompt is string => typeof prompt === "string",
     )
   }
+  if (typeof overrides.observeToolFailures === "boolean") merged.observeToolFailures = overrides.observeToolFailures
   return merged
 }
 

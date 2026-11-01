@@ -37,13 +37,19 @@ const RPC_ID = "autocontinue"
 
 interface WatchStatusView {
   sessionID: string
-  state: "watching" | "confirming" | "stopped" | "done"
+  state: "watching" | "confirming" | "stopped" | "paused" | "done"
   injections: number
   /** Lifetime injections for this watch (never reset by user turns). */
   totalInjections?: number
   lastInjectedAt?: number
   /** Epoch ms when watching started for this session (drives the sidebar timer). */
   since?: number
+  /** Failing verification rounds in the current round (verify-driven loop). */
+  rejections?: number
+  /** True while a verification command is in flight for this session. */
+  verifying?: boolean
+  /** Observed distinct tool failures in the current round (opt-in, display only). */
+  toolFailureCount?: number
 }
 
 type RpcClient = {
@@ -179,7 +185,8 @@ export default Plugin.define({
         const status = statusOf(sessionID)
         if (status === undefined) return null
         if (status.state === "done") return "[AC ✓]"
-        if (status.state === "stopped") return `[AC ⏸ ${status.injections}]`
+        if (status.state === "paused") return "[AC ⏸]"
+        if (status.state === "stopped") return `[AC ⏹ ${status.injections}]`
         return "[AC ●]"
       })
       return <text>{() => label()}</text>
@@ -256,6 +263,13 @@ export default Plugin.define({
         const roundSuffix = typeof status.totalInjections === "number" && roundIn !== lifetime ? ` (${roundIn} this round)` : ""
         metricLines.push(`🔄 ${lifetime} injection${lifetime === 1 ? "" : "s"}${roundSuffix}`)
         metricLines.push(`🎯 ${status.state}`)
+        if (status.verifying) metricLines.push("🔍 verifying")
+        if (typeof status.rejections === "number" && status.rejections > 0) {
+          metricLines.push(`🚫 ${status.rejections} rejection(s)`)
+        }
+        if (typeof status.toolFailureCount === "number" && status.toolFailureCount > 0) {
+          metricLines.push(`🛠 ${status.toolFailureCount} tool failure(s)`)
+        }
         return metricLines.join("\n")
       })
 
@@ -440,12 +454,21 @@ export default Plugin.define({
           const injections = event?.data?.injections ?? event?.properties?.injections ?? 0
           const totalInjections: number | undefined =
             event?.data?.totalInjections ?? event?.properties?.totalInjections
+          const rejections: number | undefined = event?.data?.rejections ?? event?.properties?.rejections
+          const verifying: boolean | undefined = event?.data?.verifying ?? event?.properties?.verifying
+          const toolFailureCount: number | undefined =
+            event?.data?.toolFailureCount ?? event?.properties?.toolFailureCount
           if (typeof sessionID !== "string") return
           if (state === "stopped") {
             // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
             // 用 RPC status 复查区分：unwatch 后 status.watched=false → 清空本地信号。
             void refreshStatus(sessionID)
-          } else if (state === "watching" || state === "confirming" || state === "done") {
+          } else if (
+            state === "watching" ||
+            state === "confirming" ||
+            state === "paused" ||
+            state === "done"
+          ) {
             // Per-session store: events for any watched session update only
             // that session's entry — no cross-session overwrite. Merge with
             // the existing entry so `since` (watch start) and lastInjectedAt
@@ -458,6 +481,9 @@ export default Plugin.define({
               state,
               injections,
               ...(typeof totalInjections === "number" ? { totalInjections } : {}),
+              ...(typeof rejections === "number" ? { rejections } : {}),
+              ...(typeof verifying === "boolean" ? { verifying } : {}),
+              ...(typeof toolFailureCount === "number" ? { toolFailureCount } : {}),
             })
           }
         })
