@@ -69,6 +69,13 @@ export interface PluginConfig {
   /** Opt-in tool-failure observation counter (observation only, never affects
    *  completion/stop decisions). */
   observeToolFailures: boolean
+  /** Substrings (case-insensitive) that mark a real user message as an
+   *  expression of dissatisfaction with the delivered quality. Empty = the
+   *  frustration trigger is disabled. */
+  frustrationTriggers: string[]
+  /** Reminder appended to the next injection after a frustration hit. Only
+   *  effective while frustrationTriggers is non-empty. */
+  frustrationMessage: string
 }
 
 export const DEFAULT_CONFIG: PluginConfig = {
@@ -80,7 +87,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   idleDelayMs: 15_000,
   minIntervalMs: 30_000,
   maxConsecutive: 20,
-  watchTimeoutMs: 0,
+  watchTimeoutMs: 86_400_000,
   completionMarkers: [
     "[任务完成]",
     "[夜间任务完成]",
@@ -110,7 +117,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   intervalMs: 3_600_000,
   verifyCommand: "",
   verifyTimeoutMs: 120_000,
-  verifyMaxIterations: 0,
+  verifyMaxIterations: 50,
   verifyCwd: "",
   selfEchoWindowMs: 10_000,
   abortSentinelTag: "loop-abort",
@@ -127,6 +134,11 @@ export const DEFAULT_CONFIG: PluginConfig = {
     "退回去从需求本身重新质疑。",
   ],
   observeToolFailures: false,
+  // P2: the frustration trigger is OFF by default (an empty trigger list) —
+  // a false positive would push a rebuke into a normal round.
+  frustrationTriggers: [],
+  frustrationMessage:
+    "用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。",
 }
 
 /** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
@@ -284,6 +296,16 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
     )
   }
   if (typeof overrides.observeToolFailures === "boolean") merged.observeToolFailures = overrides.observeToolFailures
+  // P2: the trigger list REPLACES the default (never concatenated) and an
+  // explicit [] disables the frustration path. Blank entries are dropped.
+  if (Array.isArray(overrides.frustrationTriggers)) {
+    merged.frustrationTriggers = overrides.frustrationTriggers.filter(
+      (trigger): trigger is string => typeof trigger === "string" && trigger.length > 0,
+    )
+  }
+  if (typeof overrides.frustrationMessage === "string") {
+    merged.frustrationMessage = overrides.frustrationMessage
+  }
   return merged
 }
 

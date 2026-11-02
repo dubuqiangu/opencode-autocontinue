@@ -106,6 +106,9 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
         rejections: entry?.rejections ?? 0,
         verifying: false,
         toolFailureCount: store.getMemory(input.sessionID).toolFailureCount,
+        // Only present when the round carries a stop reason (the RPC schema
+        // rejects undefined values, so the field is omitted otherwise).
+        ...(entry?.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
       })
       return { state }
     },

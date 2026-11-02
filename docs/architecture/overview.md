@@ -46,5 +46,5 @@ TUI 插件
 
 - **语法**：`node --check src/*.ts`（server 纯 TS）
 - **打包**：`npm run build:tui`（esbuild bundle `src/tui.tsx` → `dist/tui.js`，`@opencode/*`/`@opentui/*`/`solid-js` 全 external，`exports["./tui"]` 指向 bundle）
-- **单元测试**：`node --test test/*.test.ts`（162 用例，覆盖解析/判定矩阵/节流/时段/排除/完成标记/并发/跨日窗口/验证 Loop/哨兵/配置健壮性/多字节解码）
+- **单元测试**：`node --test test/*.test.ts`（覆盖解析/判定矩阵/节流/时段/排除/完成标记/并发/跨日窗口/验证 Loop/哨兵/配置健壮性/多字节解码/挫败感触发/停止原因）
 - **真机**：本地 `file://` 加载，重启后验证 on/status/off、错误/空闲注入、完成标记停止

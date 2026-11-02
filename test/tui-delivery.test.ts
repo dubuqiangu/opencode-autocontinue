@@ -76,3 +76,124 @@ test("dist/tui.js is not a stale build (src marker is inside the bundle)", () =>
     "dist/tui.js lacks the current src fold marker — stale bundle, run npm run build:tui",
   )
 })
+
+// v0.5.2 stop-reason delivery guards (architecture/provenance-and-loop.md
+// §9.5 P3, TUI bullet). The stop reason is surfaced in exactly two places:
+// the footer indicator and the /autocontinue status toast. The right sidebar
+// keeps its existing contract — terminal states are NOT rendered there.
+
+const STOP_REASONS = [
+  "window-closed",
+  "watch-timeout",
+  "injection-cap",
+  "verify-limit",
+  "idle-interrupted",
+  "user-interrupted",
+  "abort-sentinel",
+]
+
+/**
+ * src/tui.tsx is TSX and imports host-provided externals (@opencode/plugin/tui,
+ * solid-js), so the test harness cannot import it directly (node's type
+ * stripping rejects the .tsx extension). The stop-reason helpers are lifted
+ * out of the source text and evaluated in isolation instead — the assertions
+ * below therefore exercise the real mapping that ships in the bundle.
+ */
+function loadStopReasonHelpers(source: string): {
+  labels: Record<string, string>
+  label: (reason: string | undefined) => string | undefined
+} {
+  const start = source.indexOf("export const STOP_REASON_LABELS")
+  const end = source.indexOf("export default Plugin.define(")
+  assert.ok(start >= 0, "src/tui.tsx must define STOP_REASON_LABELS")
+  assert.ok(end > start, "src/tui.tsx must define the stop-reason helpers above the plugin default export")
+  const region = source
+    .slice(start, end)
+    .replace(/export /g, "")
+    .replace(/: Record<string, string>/g, "")
+    .replace(/: string \| undefined/g, "")
+  const factory = new Function(`${region}\nreturn { STOP_REASON_LABELS, stopReasonLabel }`)
+  const evaluated = factory() as {
+    STOP_REASON_LABELS: Record<string, string>
+    stopReasonLabel: (reason: string | undefined) => string | undefined
+  }
+  return { labels: evaluated.STOP_REASON_LABELS, label: evaluated.stopReasonLabel }
+}
+
+test("stopReasonLabel maps every known stop reason to a non-empty phrase", () => {
+  const { labels, label } = loadStopReasonHelpers(readRepo("src/tui.tsx"))
+  for (const reason of STOP_REASONS) {
+    const phrase = label(reason)
+    assert.ok(typeof phrase === "string" && phrase.length > 0, `${reason} must map to a non-empty phrase`)
+    assert.equal(phrase, labels[reason], `${reason} must resolve to its mapped phrase`)
+  }
+  assert.equal(Object.keys(labels).length, STOP_REASONS.length, "the label map must cover exactly the seven stop reasons")
+})
+
+test("stopReasonLabel returns undefined for an unknown or missing reason", () => {
+  const { label } = loadStopReasonHelpers(readRepo("src/tui.tsx"))
+  assert.equal(label(undefined), undefined, "a missing stop reason has no phrase")
+  assert.equal(label("not-a-stop-reason"), undefined, "an unknown stop reason has no phrase")
+})
+
+test("footer indicator renders the stop reason phrase and omits it when absent", () => {
+  const source = readRepo("src/tui.tsx")
+  assert.ok(
+    source.includes("[AC ⏹ ${status.injections} · ${phrase}]"),
+    "the footer label must render [AC ⏹ N · phrase]",
+  )
+  assert.ok(
+    source.includes("[AC ⏹ ${status.injections}]"),
+    "the footer label must fall back to [AC ⏹ N] when there is no stop reason",
+  )
+})
+
+test("the /autocontinue status toast includes the stop reason phrase", () => {
+  const source = readRepo("src/tui.tsx")
+  assert.ok(
+    source.includes("stopReasonLabel(result.state.stopReason)"),
+    "the status toast must resolve the stop reason phrase",
+  )
+  assert.ok(source.includes("` · ${stopPhrase}`"), "the status toast must append the stop reason phrase")
+})
+
+test("the sidebar block still renders no terminal state and no stop reason", () => {
+  const source = readRepo("src/tui.tsx")
+  const sidebarStart = source.indexOf("const SidebarStatus =")
+  const sidebarEnd = source.indexOf("// Per-slot reactive mounts")
+  assert.ok(sidebarStart >= 0 && sidebarEnd > sidebarStart, "src/tui.tsx must define the SidebarStatus block")
+  const sidebar = source.slice(sidebarStart, sidebarEnd)
+  assert.ok(
+    !sidebar.includes("stopReason"),
+    "the sidebar block must not render the stop reason (footer + toast only)",
+  )
+  assert.ok(
+    sidebar.includes('status.state !== "watching" && status.state !== "confirming"'),
+    "the sidebar block must keep gating terminal states out",
+  )
+})
+
+test("dist/tui.js carries the stop-reason handling", () => {
+  const bundle = readRepo("dist/tui.js")
+  assert.ok(bundle.includes("STOP_REASON_LABELS"), "the bundle must contain the stop-reason label map")
+  assert.ok(bundle.includes("stopReasonLabel"), "the bundle must contain the stop-reason label helper")
+  assert.ok(
+    bundle.includes("stopReasonLabel(status.stopReason)"),
+    "the bundle footer must resolve the stop reason phrase",
+  )
+  assert.ok(
+    bundle.includes("stopReasonLabel(result.state.stopReason)"),
+    "the bundle status toast must resolve the stop reason phrase",
+  )
+})
+
+test("dist/tui.js is not a stale build (stop-reason helper is inside the bundle)", () => {
+  const source = readRepo("src/tui.tsx")
+  const bundle = readRepo("dist/tui.js")
+  const stopReasonMarker = "STOP_REASON_LABELS"
+  assert.ok(source.includes(stopReasonMarker), "precondition: src/tui.tsx defines the stop-reason label map")
+  assert.ok(
+    bundle.includes(stopReasonMarker),
+    "dist/tui.js lacks the stop-reason helper — stale bundle, run npm run build:tui",
+  )
+})

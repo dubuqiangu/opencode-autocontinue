@@ -10,8 +10,37 @@ export interface StorageLike {
 
 const STORAGE_KEY = "opencode-autocontinue.watched"
 
+/** Why a watch round stopped. Persisted with the watch state so the UI can
+ *  tell a guardrail stop apart from a window close or a user abort. */
+export type StopReason =
+  | "window-closed"
+  | "watch-timeout"
+  | "injection-cap"
+  | "verify-limit"
+  | "idle-interrupted"
+  | "user-interrupted"
+  | "abort-sentinel"
+
+const STOP_REASONS: readonly StopReason[] = [
+  "window-closed",
+  "watch-timeout",
+  "injection-cap",
+  "verify-limit",
+  "idle-interrupted",
+  "user-interrupted",
+  "abort-sentinel",
+]
+
+/** Whether a persisted value is one of the known stop reasons. */
+export function isStopReason(value: unknown): value is StopReason {
+  return typeof value === "string" && STOP_REASONS.includes(value as StopReason)
+}
+
 export interface InMemoryState {
   inFlight: boolean
+  /** True when a real user message expressed dissatisfaction with the quality;
+   *  the frustration clause is then appended to the next injection. */
+  frustrationPending: boolean
   pendingContinue: boolean
   /** Epoch ms when pendingContinue was set (staleness check for the latch). */
   pendingContinueAt: number
@@ -83,6 +112,8 @@ export class WatchStore {
             rejections: typeof entry.rejections === "number" ? entry.rejections : 0,
             roundId: typeof entry.roundId === "number" ? entry.roundId : 0,
             ...(typeof entry.lastInjectedAt === "number" ? { lastInjectedAt: entry.lastInjectedAt } : {}),
+            // A stop reason only survives when it is one of the known values.
+            ...(isStopReason(entry.stopReason) ? { stopReason: entry.stopReason } : {}),
           })
         }
       }
@@ -120,6 +151,7 @@ export class WatchStore {
     if (!memory) {
       memory = {
         inFlight: false,
+        frustrationPending: false,
         pendingContinue: false,
         pendingContinueAt: 0,
         lastUserMessageAt: 0,
@@ -184,14 +216,20 @@ export class WatchStore {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.state = "done"
+    // A finished round carries no stop reason (a previous round's reason must
+    // not leak into the "done" status).
+    entry.stopReason = undefined
     await this.persist()
   }
 
-  /** Mark stopped (max injections / end time / watch timeout / explicit abort). */
-  async markStopped(sessionID: string): Promise<void> {
+  /** Mark stopped (max injections / end time / watch timeout / explicit abort).
+   *  The optional reason records WHY the round stopped; calling without one
+   *  clears any previously stored reason. */
+  async markStopped(sessionID: string, reason?: StopReason): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.state = "stopped"
+    entry.stopReason = reason
     await this.persist()
   }
 
@@ -224,15 +262,27 @@ export class WatchStore {
     await this.persist()
   }
 
-  /** Return to watching (e.g. user re-enables, or a fresh real user message). */
-  async resume(sessionID: string, recomputeEndAt = false): Promise<void> {
+  /** Return to watching (e.g. user re-enables, or a fresh real user message).
+   *  `preserveRejections` keeps the failure counter when the user message was
+   *  itself a complaint (the previous delivery was rejected), while the round
+   *  id still advances so an in-flight verification result is discarded. */
+  async resume(
+    sessionID: string,
+    recomputeEndAt = false,
+    preserveRejections = false,
+  ): Promise<void> {
     const entry = this.watched.get(sessionID)
     if (!entry) return
     entry.state = "watching"
     entry.injections = 0
+    // A new round has no stop reason yet — the previous round's reason must
+    // not leak into the resumed status.
+    entry.stopReason = undefined
     // A real user message starts a new round: its failures reset, and the round
     // id advances so a verification result from the previous round is discarded.
-    entry.rejections = 0
+    // A complaint about the delivered quality is itself evidence that the last
+    // round was rejected, so that counter is preserved.
+    if (!preserveRejections) entry.rejections = 0
     entry.roundId += 1
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
@@ -294,6 +344,8 @@ export class WatchStore {
         rejections: entry.rejections,
         verifying: memory?.verifying ?? false,
         toolFailureCount: memory?.toolFailureCount ?? 0,
+        // Only present while the round carries a stop reason.
+        ...(entry.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
       },
     }
   }
@@ -309,6 +361,8 @@ export class WatchStore {
       rejections: entry.rejections,
       verifying: this.inMemory.get(entry.sessionID)?.verifying ?? false,
       toolFailureCount: this.inMemory.get(entry.sessionID)?.toolFailureCount ?? 0,
+      // Only present while the round carries a stop reason.
+      ...(entry.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
     }))
   }
 }

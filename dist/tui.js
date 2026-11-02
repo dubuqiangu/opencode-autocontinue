@@ -43,7 +43,19 @@ var AUTOCONTINUE_RPC_CONTRACT = {
               since: { type: "number" },
               rejections: { type: "number" },
               verifying: { type: "boolean" },
-              toolFailureCount: { type: "number" }
+              toolFailureCount: { type: "number" },
+              stopReason: {
+                type: "string",
+                enum: [
+                  "window-closed",
+                  "watch-timeout",
+                  "injection-cap",
+                  "verify-limit",
+                  "idle-interrupted",
+                  "user-interrupted",
+                  "abort-sentinel"
+                ]
+              }
             },
             required: ["sessionID", "state", "injections", "totalInjections", "since"],
             additionalProperties: false
@@ -73,7 +85,20 @@ var AUTOCONTINUE_RPC_CONTRACT = {
           injections: { type: "number" },
           totalInjections: { type: "number" },
           rejections: { type: "number" },
-          verifying: { type: "boolean" }
+          verifying: { type: "boolean" },
+          toolFailureCount: { type: "number" },
+          stopReason: {
+            type: "string",
+            enum: [
+              "window-closed",
+              "watch-timeout",
+              "injection-cap",
+              "verify-limit",
+              "idle-interrupted",
+              "user-interrupted",
+              "abort-sentinel"
+            ]
+          }
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false
@@ -136,6 +161,19 @@ function formatDuration(ms) {
   if (hours > 0) return `${hours}h ${minutes}m`;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
+}
+var STOP_REASON_LABELS = {
+  "window-closed": "window closed",
+  "watch-timeout": "watch timeout",
+  "injection-cap": "injection cap",
+  "verify-limit": "verify limit",
+  "idle-interrupted": "interrupted while idle",
+  "user-interrupted": "stopped by user",
+  "abort-sentinel": "abort sentinel"
+};
+function stopReasonLabel(reason) {
+  if (reason === void 0) return void 0;
+  return STOP_REASON_LABELS[reason];
 }
 var tui_default = Plugin.define({
   id: "opencode-autocontinue-tui",
@@ -210,7 +248,10 @@ var tui_default = Plugin.define({
         if (status === void 0) return null;
         if (status.state === "done") return "[AC \u2713]";
         if (status.state === "paused") return "[AC \u23F8]";
-        if (status.state === "stopped") return `[AC \u23F9 ${status.injections}]`;
+        if (status.state === "stopped") {
+          const phrase = stopReasonLabel(status.stopReason);
+          return phrase === void 0 ? `[AC \u23F9 ${status.injections}]` : `[AC \u23F9 ${status.injections} \xB7 ${phrase}]`;
+        }
         return "[AC \u25CF]";
       });
       return /* @__PURE__ */ jsx("text", { children: () => label() });
@@ -351,9 +392,11 @@ var tui_default = Plugin.define({
                           const result = await rpc.status({ sessionID });
                           if (result.watched && result.state) {
                             updateStatus(sessionID, result.state);
+                            const stopPhrase = result.state.state === "stopped" ? stopReasonLabel(result.state.stopReason) : void 0;
+                            const stopSuffix = stopPhrase === void 0 ? "" : ` \xB7 ${stopPhrase}`;
                             showToast(
                               "Autocontinue",
-                              `Watching \xB7 ${result.state.state} \xB7 ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}`,
+                              `Watching \xB7 ${result.state.state} \xB7 ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
                               "info"
                             );
                           } else {
@@ -402,8 +445,23 @@ var tui_default = Plugin.define({
           const rejections = event?.data?.rejections ?? event?.properties?.rejections;
           const verifying = event?.data?.verifying ?? event?.properties?.verifying;
           const toolFailureCount = event?.data?.toolFailureCount ?? event?.properties?.toolFailureCount;
+          const stopReason = event?.data?.stopReason ?? event?.properties?.stopReason;
           if (typeof sessionID !== "string") return;
           if (state === "stopped") {
+            if (typeof stopReason === "string") {
+              const current = statusOf(sessionID);
+              updateStatus(sessionID, {
+                ...current ?? {},
+                sessionID,
+                state,
+                injections,
+                ...typeof totalInjections === "number" ? { totalInjections } : {},
+                ...typeof rejections === "number" ? { rejections } : {},
+                ...typeof verifying === "boolean" ? { verifying } : {},
+                ...typeof toolFailureCount === "number" ? { toolFailureCount } : {},
+                stopReason
+              });
+            }
             void refreshStatus(sessionID);
           } else if (state === "watching" || state === "confirming" || state === "paused" || state === "done") {
             const current = statusOf(sessionID);
@@ -415,7 +473,10 @@ var tui_default = Plugin.define({
               ...typeof totalInjections === "number" ? { totalInjections } : {},
               ...typeof rejections === "number" ? { rejections } : {},
               ...typeof verifying === "boolean" ? { verifying } : {},
-              ...typeof toolFailureCount === "number" ? { toolFailureCount } : {}
+              ...typeof toolFailureCount === "number" ? { toolFailureCount } : {},
+              // A live / done round carries no stop reason — drop any stale
+              // one left over from an earlier stopped round.
+              stopReason: void 0
             });
           }
         });
@@ -452,5 +513,7 @@ var tui_default = Plugin.define({
   }
 });
 export {
-  tui_default as default
+  STOP_REASON_LABELS,
+  tui_default as default,
+  stopReasonLabel
 };

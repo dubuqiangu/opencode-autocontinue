@@ -39,7 +39,8 @@ server storage（`ctx.storage.set/get`，跨重启）：
       "rejections": 0,
       "roundId": 2,
       "lastInjectedAt": 1730000060000,
-      "state": "watching|confirming|stopped|paused|done"
+      "state": "watching|confirming|stopped|paused|done",
+      "stopReason": "window-closed|watch-timeout|injection-cap|verify-limit|idle-interrupted|user-interrupted|abort-sentinel"
     }
   }
 }
@@ -49,6 +50,7 @@ server storage（`ctx.storage.set/get`，跨重启）：
 - `injections` 本轮注入计数（真实用户消息 `resume()` 归零，驱动 `maxConsecutive`）；`totalInjections` 本次 watch 起的累计（不随用户消息清零）
 - `rejections` 本轮验证失败次数；`roundId` 轮次标识（`resume()` +1，用于丢弃陈旧验证结果）。旧字段 `consecutive` 已于 v0.3.0 移除
 - `state` 联合 `watching | confirming | stopped | paused | done`；hydrate 保留 `paused`（等待用户输入的活动值守），丢弃终态 `done` / `stopped`
+- `stopReason` 停止原因（**可选**）：**仅 `stopped` 行存在**，取值 `window-closed`（值守窗口到点）/ `watch-timeout`（墙钟上限）/ `injection-cap`（注入次数上限）/ `verify-limit`（验证失败次数上限）/ `idle-interrupted`（空闲轮被中断）/ `user-interrupted`（用户主动中止）/ `abort-sentinel`（模型输出 abort 哨兵）；其余状态不带此字段。护栏停止一律记为 `stopped`，绝不记为 `done`（v0.5.2）
 - 内存态另含 `inFlight` / `pendingContinue` / `verifying` 等锁（不持久化）
 
 ## 状态机
@@ -62,7 +64,7 @@ stateDiagram-v2
     Confirming --> Watching: 复查回复无标记<br/>回到 watching
     Watching --> Paused: pause 哨兵<br/>等待用户新消息
     Paused --> Watching: 用户新消息 / resume()
-    Watching --> Stopped: 达 maxConsecutive / 到 endTime / off<br/>或 abort 哨兵
+    Watching --> Stopped: 达 maxConsecutive / 到 endTime / off<br/>或 abort 哨兵（记录 stopReason）
     Stopped --> Watching: /autocontinue on
     Done --> Watching: /autocontinue on
     Watching --> [*]: /autocontinue off<br/>删除 storage 记录

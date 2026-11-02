@@ -183,6 +183,17 @@ export function composeRejectionPrompt(cfg: PluginConfig, rejections: number): s
   return lines.join("\n")
 }
 
+/** Case-insensitive substring match of a real user message against the
+ *  configured frustration triggers. An empty trigger list disables the
+ *  feature (the default), so nothing is ever reported then. */
+export function matchesFrustration(text: string | undefined, triggers: string[]): boolean {
+  if (!text || triggers.length === 0) return false
+  const loweredText = text.toLowerCase()
+  return triggers.some(
+    (trigger) => trigger.length > 0 && loweredText.includes(trigger.toLowerCase()),
+  )
+}
+
 export class AutocontinueEngine {
   private readonly session: SessionLike
   private readonly config: () => PluginConfig
@@ -310,7 +321,14 @@ export class AutocontinueEngine {
     template: string,
     endAt: number,
   ): Promise<string> {
-    const text = await injectContinuation(this.session, sessionID, template, endAt)
+    const cfg = this.config()
+    // P2 (frustration): a frustrated real user turn decorates the NEXT
+    // injection with the reminder clause. Compose it into the template BEFORE
+    // injecting so the self-echo guard records exactly the text we send.
+    const decorate = memory.frustrationPending && cfg.frustrationMessage !== ""
+    const composed = decorate ? `${template}\n\n${cfg.frustrationMessage}` : template
+    if (decorate) memory.frustrationPending = false
+    const text = await injectContinuation(this.session, sessionID, composed, endAt)
     memory.lastSelfInjection = { text, at: Date.now() }
     return text
   }
@@ -415,7 +433,7 @@ export class AutocontinueEngine {
     await this.store.recordRejection(sessionID)
     const rejections = this.store.getState(sessionID)?.rejections ?? 0
     if (cfg.verifyMaxIterations > 0 && rejections >= cfg.verifyMaxIterations) {
-      await this.store.markStopped(sessionID)
+      await this.store.markStopped(sessionID, "verify-limit")
       this.clearTimer(sessionID)
       this.stopInterval(sessionID)
       void this.emitChangedInternal(sessionID, "stopped")
@@ -451,7 +469,7 @@ export class AutocontinueEngine {
       // Time window (endAt frozen at watch time).
       if (startGateClosed(cfg.startTime, cfg.endTime)) return
       if (entry.endAt && Date.now() >= entry.endAt) {
-        await this.store.markStopped(sessionID)
+        await this.store.markStopped(sessionID, "window-closed")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
@@ -460,7 +478,7 @@ export class AutocontinueEngine {
 
       // Wall-clock watch budget (watchTimeoutMs = 0 means no limit).
       if (cfg.watchTimeoutMs > 0 && Date.now() - entry.since >= cfg.watchTimeoutMs) {
-        await this.store.markStopped(sessionID)
+        await this.store.markStopped(sessionID, "watch-timeout")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
@@ -469,7 +487,7 @@ export class AutocontinueEngine {
 
       // Injection cap.
       if (cfg.maxConsecutive > 0 && entry.injections >= cfg.maxConsecutive) {
-        await this.store.markStopped(sessionID)
+        await this.store.markStopped(sessionID, "injection-cap")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
@@ -526,7 +544,7 @@ export class AutocontinueEngine {
       // running (or orphaned non-terminal) subagent must never make the model's
       // explicit abort be ignored.
       if (matchSentinel(latest.text, cfg.abortSentinelTag)) {
-        await this.store.markStopped(sessionID)
+        await this.store.markStopped(sessionID, "abort-sentinel")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
@@ -763,6 +781,8 @@ export class AutocontinueEngine {
       rejections: entry?.rejections ?? 0,
       verifying: this.store.isVerifying(sessionID),
       toolFailureCount: this.store.getMemory(sessionID).toolFailureCount,
+      // Only present while the round carries a stop reason.
+      ...(entry?.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
     })
   }
 
@@ -822,7 +842,7 @@ export class AutocontinueEngine {
         // schedule any further injection. Other idle outcomes (succeeded/
         // failed) keep the existing continue-on-idle behavior.
         if (idleOutcomeFromEvent(event) === "interrupted") {
-          await this.store.markStopped(sessionID)
+          await this.store.markStopped(sessionID, "idle-interrupted")
           this.clearTimer(sessionID)
           this.stopInterval(sessionID)
           void this.emitChangedInternal(sessionID, "stopped")
@@ -841,7 +861,7 @@ export class AutocontinueEngine {
       case "session.execution.interrupted": {
         // V2: user manually stopped the run (Esc) — explicit stop, mirroring the
         // V1 idle-with-outcome=interrupted path above.
-        await this.store.markStopped(sessionID)
+        await this.store.markStopped(sessionID, "user-interrupted")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")
@@ -881,10 +901,16 @@ export class AutocontinueEngine {
             memory.lastSelfInjection = undefined
             break
           }
+          // P2: a complaint about the delivered quality decorates the next
+          // injection and keeps the rejection counter (the last delivery was
+          // rejected). Matching happens AFTER the self-echo guard so our own
+          // injected text can never trigger it.
+          const frustrated = matchesFrustration(itemText, cfg.frustrationTriggers)
+          if (frustrated) memory.frustrationPending = true
           memory.lastUserMessageAt = Date.now()
           // A real user turn supersedes any in-flight verification round.
           this.abortVerify(sessionID)
-          await this.store.resume(sessionID, true)
+          await this.store.resume(sessionID, true, frustrated)
           this.confirmingAtAssistantCount.delete(sessionID)
           this.scheduleInterval(sessionID)
           void this.emitChangedInternal(sessionID, "watching")
@@ -907,9 +933,14 @@ export class AutocontinueEngine {
             memory.lastSelfInjection = undefined
             break
           }
+          // P2: same frustration handling as the V2 inbox branch — matched
+          // AFTER the self-echo guard, and a complaint keeps the rejection
+          // counter because the previous delivery was rejected.
+          const frustrated = matchesFrustration(infoText, cfg.frustrationTriggers)
+          if (frustrated) memory.frustrationPending = true
           memory.lastUserMessageAt = Date.now()
           this.abortVerify(sessionID)
-          await this.store.resume(sessionID, true)
+          await this.store.resume(sessionID, true, frustrated)
           this.confirmingAtAssistantCount.delete(sessionID)
           this.scheduleInterval(sessionID)
           void this.emitChangedInternal(sessionID, "watching")

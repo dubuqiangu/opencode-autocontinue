@@ -144,6 +144,7 @@ import {
   retryHookHandler,
   selectPressureMessage,
   composeRejectionPrompt,
+  matchesFrustration,
 } from "../src/engine.ts"
 import { WatchStore } from "../src/state.ts"
 import {
@@ -180,10 +181,20 @@ async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
   const session = makeFakeSession()
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const events: Array<{ sessionID: string; state: string; injections: number }> = []
+  const events: Array<{
+    sessionID: string
+    state: string
+    injections: number
+    stopReason?: string
+  }> = []
   const config = () => ({ ...DEFAULT_CONFIG, ...overrides })
   const engine = new AutocontinueEngine(session as any, config, store, (event) => {
-    events.push({ sessionID: event.sessionID, state: event.state, injections: event.injections })
+    events.push({
+      sessionID: event.sessionID,
+      state: event.state,
+      injections: event.injections,
+      stopReason: event.stopReason,
+    })
   })
   return { session, store, engine, events }
 }
@@ -746,7 +757,20 @@ test("DEFAULT_CONFIG has 1h interval and a final check enabled by default", () =
   assert.equal(DEFAULT_CONFIG.intervalMs, 3_600_000)
   assert.equal(DEFAULT_CONFIG.finalCheckEnabled, true)
   assert.match(DEFAULT_CONFIG.finalCheckMessage, /整体检查/)
-  assert.equal(DEFAULT_CONFIG.watchTimeoutMs, 0)
+  // P3: the unattended guardrails now have finite defaults — 24h watch budget
+  // and 50 verification rounds. 0 still means "unlimited" when set explicitly.
+  assert.equal(DEFAULT_CONFIG.watchTimeoutMs, 86_400_000)
+  assert.equal(DEFAULT_CONFIG.verifyMaxIterations, 50)
+})
+
+test("DEFAULT_CONFIG ships the frustration trigger disabled with its default message", () => {
+  // P2: an empty trigger list keeps the feature off — a false positive would
+  // push a rebuke into a normal round.
+  assert.deepEqual(DEFAULT_CONFIG.frustrationTriggers, [])
+  assert.equal(
+    DEFAULT_CONFIG.frustrationMessage,
+    "用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。",
+  )
 })
 
 test("mergeConfig overrides intervalMs and finalCheck settings", () => {
@@ -1541,6 +1565,7 @@ async function makeVerifyEngine(
     injections: number
     rejections?: number
     verifying?: boolean
+    stopReason?: string
   }> = []
   const config = () => ({ ...DEFAULT_CONFIG, verifyCommand: "node --version", ...overrides })
   const engine = new AutocontinueEngine(
@@ -1554,6 +1579,7 @@ async function makeVerifyEngine(
         injections: event.injections,
         rejections: event.rejections,
         verifying: event.verifying,
+        stopReason: event.stopReason,
       })
     },
     verifyRunner,
@@ -2319,4 +2345,232 @@ test("abortVerify aborts an in-flight verification command (lifecycle)", async (
 test("WatchStore.resetInjectionCount dead code is removed", async () => {
   const { store } = await makeEngine()
   assert.equal((store as { resetInjectionCount?: unknown }).resetInjectionCount, undefined)
+})
+
+// --- P2: frustration trigger (a complaint decorates the next injection) ---
+
+test("matchesFrustration is a case-insensitive substring match on a non-empty trigger list", () => {
+  assert.equal(matchesFrustration("这个结果太糟糕了", ["糟糕"]), true)
+  assert.equal(matchesFrustration("这个结果太糟糕了", ["糟 糕"]), false)
+  assert.equal(matchesFrustration("这个结果太糟糕了", ["糟糕".toUpperCase()]), true)
+  // An empty trigger list disables the feature (the default).
+  assert.equal(matchesFrustration("这个结果太糟糕了", []), false)
+  // No text -> no match.
+  assert.equal(matchesFrustration(undefined, ["糟糕"]), false)
+})
+
+test("a frustrated user turn appends the frustration clause to the next injection", async () => {
+  const { session, store, engine } = await makeEngine({
+    frustrationTriggers: ["不满意"],
+    userGraceMs: 0,
+    minIntervalMs: 0,
+  })
+  await store.watch("ses_frustrated")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_frustrated",
+    data: { item: { type: "user", payload: { text: "这个结果太让人不满意了" } } },
+  })
+  await engine.maybeInject("ses_frustrated")
+  assert.equal(session.prompts.length, 1)
+  assert.ok(session.prompts[0]?.includes(DEFAULT_CONFIG.frustrationMessage))
+  // The clause is one-shot: the injection after it is plain again.
+  await engine.maybeInject("ses_frustrated")
+  assert.equal(session.prompts.length, 2)
+  assert.ok(!session.prompts[1]?.includes(DEFAULT_CONFIG.frustrationMessage))
+})
+
+test("an ordinary user turn does not append the frustration clause", async () => {
+  const { session, store, engine } = await makeEngine({
+    frustrationTriggers: ["不满意"],
+    userGraceMs: 0,
+    minIntervalMs: 0,
+  })
+  await store.watch("ses_calm")
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_calm",
+    data: { item: { type: "user", payload: { text: "继续推进下一步" } } },
+  })
+  await engine.maybeInject("ses_calm")
+  assert.equal(session.prompts.length, 1)
+  assert.ok(!session.prompts[0]?.includes(DEFAULT_CONFIG.frustrationMessage))
+})
+
+test("the V1 message.updated shape also detects a frustrated user turn", async () => {
+  const { session, store, engine } = await makeEngine({
+    frustrationTriggers: ["不满意"],
+    userGraceMs: 0,
+    minIntervalMs: 0,
+  })
+  await store.watch("ses_frustrated_v1")
+  await engine.handleEvent({
+    type: "message.updated",
+    sessionID: "ses_frustrated_v1",
+    properties: {
+      info: { role: "user", parts: [{ type: "text", text: "这做的太不满意了" }] },
+    },
+  })
+  await engine.maybeInject("ses_frustrated_v1")
+  assert.equal(session.prompts.length, 1)
+  assert.ok(session.prompts[0]?.includes(DEFAULT_CONFIG.frustrationMessage))
+})
+
+test("our own injected text returning as a user turn never triggers frustration", async () => {
+  // The trigger ("继续执行") is part of our own continuation message, so only
+  // the self-echo guard can keep the frustration clause out of the next
+  // injection.
+  const { session, store, engine } = await makeEngine({
+    frustrationTriggers: ["继续执行"],
+    userGraceMs: 0,
+    minIntervalMs: 0,
+  })
+  await store.watch("ses_frustrated_echo")
+  await engine.maybeInject("ses_frustrated_echo")
+  assert.equal(session.prompts.length, 1)
+  const injectedText = session.prompts[0] ?? ""
+  // Feed our own text back as a plain user message (no provenance metadata).
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_frustrated_echo",
+    data: { item: { type: "user", payload: { text: injectedText } } },
+  })
+  assert.equal(store.getMemory("ses_frustrated_echo").frustrationPending, false)
+  await engine.maybeInject("ses_frustrated_echo")
+  assert.equal(session.prompts.length, 2)
+  assert.ok(!session.prompts[1]?.includes(DEFAULT_CONFIG.frustrationMessage))
+})
+
+test("a frustrated turn keeps the rejection counter while an ordinary turn resets it", async () => {
+  const { store, engine } = await makeEngine({
+    frustrationTriggers: ["不满意"],
+    userGraceMs: 0,
+  })
+  await store.watch("ses_rejections")
+  await store.recordRejection("ses_rejections")
+  assert.equal(store.getState("ses_rejections")?.rejections, 1)
+  // A complaint IS evidence that the last delivery was rejected: keep it.
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_rejections",
+    data: { item: { type: "user", payload: { text: "太不满意了" } } },
+  })
+  assert.equal(store.getState("ses_rejections")?.rejections, 1)
+  // An ordinary new turn starts a clean round.
+  await engine.handleEvent({
+    type: "session.inbox.enqueued",
+    sessionID: "ses_rejections",
+    data: { item: { type: "user", payload: { text: "换个方向继续" } } },
+  })
+  assert.equal(store.getState("ses_rejections")?.rejections, 0)
+})
+
+// --- P3: observable stop reasons ---
+
+test("the verify cap stops the round with stopReason verify-limit", async () => {
+  const { store, engine } = await makeVerifyEngine(
+    async () => [{ info: { role: "assistant" }, parts: [{ type: "text", text: "完成 [任务完成]" }] }],
+    async () => failVerifyResult(1),
+    { minIntervalMs: 0, verifyMaxIterations: 2 },
+  )
+  await store.watch("ses_reason_verify")
+  await engine.maybeInject("ses_reason_verify")
+  await engine.maybeInject("ses_reason_verify")
+  assert.equal(store.getState("ses_reason_verify")?.state, "stopped")
+  assert.equal(store.getState("ses_reason_verify")?.stopReason, "verify-limit")
+  assert.equal(store.status("ses_reason_verify").state?.stopReason, "verify-limit")
+  assert.equal(store.list().find((row) => row.sessionID === "ses_reason_verify")?.stopReason, "verify-limit")
+})
+
+test("the watch budget stopping the round reports stopReason watch-timeout", async () => {
+  const { store, engine, events } = await makeEngine({ watchTimeoutMs: 5_000 })
+  await store.watch("ses_reason_timeout")
+  const entry = store.getState("ses_reason_timeout")
+  if (entry) entry.since = Date.now() - 10_000
+  await engine.maybeInject("ses_reason_timeout")
+  assert.equal(store.getState("ses_reason_timeout")?.state, "stopped")
+  assert.equal(store.getState("ses_reason_timeout")?.stopReason, "watch-timeout")
+  assert.equal(store.status("ses_reason_timeout").state?.stopReason, "watch-timeout")
+  const stoppedEvent = events.find((event) => event.state === "stopped")
+  assert.equal(stoppedEvent?.stopReason, "watch-timeout")
+})
+
+test("the injection cap stopping the round reports stopReason injection-cap", async () => {
+  const { store, engine, events } = await makeEngine({ maxConsecutive: 1, minIntervalMs: 0 })
+  await store.watch("ses_reason_cap")
+  await engine.maybeInject("ses_reason_cap")
+  await engine.maybeInject("ses_reason_cap")
+  assert.equal(store.getState("ses_reason_cap")?.state, "stopped")
+  assert.equal(store.getState("ses_reason_cap")?.stopReason, "injection-cap")
+  const stoppedEvent = events.find((event) => event.state === "stopped")
+  assert.equal(stoppedEvent?.stopReason, "injection-cap")
+})
+
+test("the closed time window reports stopReason window-closed", async () => {
+  const { store, engine } = await makeEngine()
+  await store.watch("ses_reason_window", Date.now() - 1_000)
+  await engine.maybeInject("ses_reason_window")
+  assert.equal(store.getState("ses_reason_window")?.state, "stopped")
+  assert.equal(store.getState("ses_reason_window")?.stopReason, "window-closed")
+})
+
+test("an abort sentinel reports stopReason abort-sentinel", async () => {
+  const session = makeFakeSession()
+  session.context = async () => [
+    { info: { role: "assistant" }, parts: [{ type: "text", text: "放弃 <loop-abort>换人工处理</loop-abort>" }] },
+  ]
+  const store = new WatchStore(new FakeStorage() as any)
+  await store.hydrate()
+  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  await store.watch("ses_reason_abort")
+  await engine.maybeInject("ses_reason_abort")
+  assert.equal(store.getState("ses_reason_abort")?.stopReason, "abort-sentinel")
+})
+
+test("an interrupted run reports stopReason idle-interrupted / user-interrupted", async () => {
+  const v1 = await makeEngine({ idleDelayMs: 5 })
+  await v1.store.watch("ses_reason_idle")
+  await v1.engine.handleEvent({ type: "session.idle", sessionID: "ses_reason_idle", outcome: "interrupted" })
+  assert.equal(v1.store.getState("ses_reason_idle")?.stopReason, "idle-interrupted")
+
+  const v2 = await makeEngine({ idleDelayMs: 5 })
+  await v2.store.watch("ses_reason_interrupted")
+  await v2.engine.handleEvent({ type: "session.execution.interrupted", sessionID: "ses_reason_interrupted" })
+  assert.equal(v2.store.getState("ses_reason_interrupted")?.stopReason, "user-interrupted")
+})
+
+test("markStopped without a reason clears a previously stored stop reason", async () => {
+  const { store } = await makeEngine()
+  await store.watch("ses_reason_cleared")
+  await store.markStopped("ses_reason_cleared", "verify-limit")
+  assert.equal(store.getState("ses_reason_cleared")?.stopReason, "verify-limit")
+  await store.markStopped("ses_reason_cleared")
+  assert.equal(store.getState("ses_reason_cleared")?.stopReason, undefined)
+  assert.equal(store.status("ses_reason_cleared").state?.stopReason, undefined)
+})
+
+test("hydrate keeps a valid stop reason and drops an invalid one", async () => {
+  const storage = new FakeStorage() as any
+  await storage.set("opencode-autocontinue.watched", {
+    ses_reason_valid: {
+      sessionID: "ses_reason_valid",
+      state: "watching",
+      injections: 0,
+      since: 1_000,
+      endAt: 0,
+      stopReason: "watch-timeout",
+    },
+    ses_reason_invalid: {
+      sessionID: "ses_reason_invalid",
+      state: "watching",
+      injections: 0,
+      since: 1_000,
+      endAt: 0,
+      stopReason: "not-a-reason",
+    },
+  })
+  const store = new WatchStore(storage)
+  await store.hydrate()
+  assert.equal(store.getState("ses_reason_valid")?.stopReason, "watch-timeout")
+  assert.equal(store.getState("ses_reason_invalid")?.stopReason, undefined)
 })

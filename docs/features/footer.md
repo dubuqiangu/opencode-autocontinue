@@ -15,6 +15,11 @@
 
 未值守的会话不渲染任何 footer 指示（返回 null，不占位）。
 
+### 停止原因文案（v0.5.2）
+
+- 会话处于 `stopped` 时，UI 显示**人类可读的停止原因**（如「已达最大注入次数」「值守窗口已关闭」「验证连续失败已达上限」），**不直接暴露 `stopReason` 的原始枚举值**（`injection-cap` / `window-closed` / `verify-limit` …）。
+- 文案出现在 footer 的已停止指示与 `/autocontinue status` 的命令 toast；原因随 `state.changed` 事件携带的 `stopReason` 字段实时写回。
+
 ## 右侧栏值守块
 
 挂载点：`sidebar.content`（append 模式，与原生 Context/MCP 段同通道，落于其下）。
@@ -34,7 +39,7 @@
 
 - **每会话独立状态**：TUI 维护 `Record<sessionID, status>` 的每会话状态表，不是单个全局信号——多会话同时值守互不覆盖（A 的标记不会因开启 B 而消失）
 - **动态读走 createMemo**：footer/sidebar 的渲染文本全部在 `createMemo` 内计算，信号变化即时触发 JSX 重渲染（无需切 session 才刷新；对应 usage-meter v0.7.8 修复的同款问题）
-- 订阅 RPC 事件 `autocontinue.state.changed`，状态变化更新对应会话的表项；事件携带 `rejections`/`verifying`/`toolFailureCount`，随状态实时写回（v0.5.0/v0.5.1）
+- 订阅 RPC 事件 `autocontinue.state.changed`，状态变化更新对应会话的表项；事件携带 `rejections`/`verifying`/`toolFailureCount`/`stopReason`，随状态实时写回（v0.5.0/v0.5.1/v0.5.2）
 - 会话 ID 来源：`slotProps.sessionID`（JSX 函数组件收到的是 props 包装对象，须先解包再读——v0.3.6 前直接读包装层导致 `lastSlotSessionID` 永不缓存，`/autocontinue` 报「No current session」），回退 `lastSlotSessionID`（slot 缓存）→ `context.ui.router.current().params.sessionID`
 
 ## 配套反馈

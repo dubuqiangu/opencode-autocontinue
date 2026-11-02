@@ -2,6 +2,8 @@
 // Shared between server (implementer) and TUI (caller).
 // Events let the TUI refresh its footer status live.
 
+import type { StopReason } from "./state.ts"
+
 export const AUTOCONTINUE_RPC_ID = "autocontinue"
 
 /**
@@ -57,6 +59,18 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
               rejections: { type: "number" },
               verifying: { type: "boolean" },
               toolFailureCount: { type: "number" },
+              stopReason: {
+                type: "string",
+                enum: [
+                  "window-closed",
+                  "watch-timeout",
+                  "injection-cap",
+                  "verify-limit",
+                  "idle-interrupted",
+                  "user-interrupted",
+                  "abort-sentinel",
+                ],
+              },
             },
             required: ["sessionID", "state", "injections", "totalInjections", "since"],
             additionalProperties: false,
@@ -88,6 +102,18 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
           rejections: { type: "number" },
           verifying: { type: "boolean" },
           toolFailureCount: { type: "number" },
+          stopReason: {
+            type: "string",
+            enum: [
+              "window-closed",
+              "watch-timeout",
+              "injection-cap",
+              "verify-limit",
+              "idle-interrupted",
+              "user-interrupted",
+              "abort-sentinel",
+            ],
+          },
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
         additionalProperties: false,
@@ -116,6 +142,8 @@ export interface WatchState {
    *  INTERNAL: not exposed via status()/list(). */
   roundId: number
   state: "watching" | "confirming" | "stopped" | "paused" | "done"
+  /** Why the round stopped (persisted). Undefined while the round is live. */
+  stopReason?: StopReason
 }
 
 export interface WatchStatus {
@@ -133,6 +161,8 @@ export interface WatchStatus {
   verifying?: boolean
   /** Observed distinct tool failures in the current round (opt-in, observation only). */
   toolFailureCount?: number
+  /** Why the round stopped (only meaningful while state is "stopped"). */
+  stopReason?: StopReason
 }
 
 /** Payload of a live `state.changed` event: everything the TUI footer / sidebar
@@ -146,6 +176,8 @@ export interface WatchStatusEvent {
   verifying?: boolean
   /** Observed distinct tool failures in the current round (opt-in, observation only). */
   toolFailureCount?: number
+  /** Why the round stopped (only meaningful while state is "stopped"). */
+  stopReason?: StopReason
 }
 
 export interface RpcContract {
@@ -175,6 +207,14 @@ export interface RpcContract {
           rejections: { type: "number" }
           verifying: { type: "boolean" }
           toolFailureCount: { type: "number" }
+          stopReason:
+            | "window-closed"
+            | "watch-timeout"
+            | "injection-cap"
+            | "verify-limit"
+            | "idle-interrupted"
+            | "user-interrupted"
+            | "abort-sentinel"
         }
         required: ["sessionID", "state", "injections", "totalInjections"]
         additionalProperties: false

@@ -33,7 +33,10 @@
 - **第一轮（v0.4.0）**：① 注入溯源（修真实 bug）→ ② 验证驱动续跑 Loop（opt-in）→ ③ 升级式提示 + ④ 终止哨兵 `LOOP_DONE`。
 - **第二轮（v0.5.0，§7）**：① 验证输出采集上限（修真实缺陷）→ ② abort/pause 哨兵 + `paused` 状态 → ③ 升级提示阈值化 + 轮次压力梯 → ④ 验证状态进 TUI/RPC → ⑤ 工具失败观测计数器（opt-in）→ B graceMs + 范围钳制。
 - **第三轮（v0.5.1，§8）**：全项目审查修复——跨午夜起点闸（`startGateClosed`）、验证前 TOCTOU 快照复检、非有限数值拒绝、字符串感知 JSONC 尾逗号、`state.changed` 携带 `toolFailureCount`、V1 工具结果观测、abort 哨兵优先于后台守卫、verify grace 定时器清理 + 增量 UTF-8 解码、死代码删除（`resetInjectionCount`）+ 补测。
-- **主动不移植**：两事件 surface-replace、tool-order 自愈、延后写重试、integrity guard、i18n、挫败感触发、feedback 循环、subagent 继承、clear/compact 特判（宿主专属或用途不符）；v0.5.0 另否决「删 V1 兼容死路径」（测试 + changelog 已锁定为有意兼容）。
+- **第四轮（v0.5.2，§9）**：dsh-pua 风格机制取证与取舍——P1 文档记录（不移植清单扩充）、P2 缩减版挫败感触发（opt-in，默认关闭）、P3 无人值守护栏（默认上界 24h / 验证轮次 50 + 停止原因可观测）。
+- **主动不移植**：两事件 surface-replace、tool-order 自愈、延后写重试、integrity guard、subagent 继承、clear/compact 特判（宿主专属或用途不符）；v0.5.0 另否决「删 V1 兼容死路径」（测试 + changelog 已锁定为有意兼容）。
+- **风格机制（dsh-pua「风味 / 模式」轴，§9.2）**：风味/人设（15 套大厂味 + 味道路由）、方法论预设、角色层级（P7/P9/P10/verifier/self-reviewer）、i18n、降压与换框协议、钉味提醒库、feedback 问卷 —— 判定不移植：前三类需要 systemPrompt / commands / agent 注册（我方宿主无此 API），降压与换框需要模型侧判断，钉味的行为诉求已被验证门控（exit code）覆盖，feedback 需要 transcript 路径；我方 `message` / `finalCheckMessage` / `escalation*` 文案槽已能承载其行为内容。
+- **缩减后借鉴（v0.5.2）**：挫败感触发 —— 只取其「真实用户抱怨 → 质量纠偏」这一可机械判定的部分，缩减为 opt-in（默认关闭）：命中后把一句质量不满提醒**追加到下一次本来就要发的注入**末尾，不新开一轮。
 
 ## 未来方向（已评估，未实现）
 

@@ -17,7 +17,7 @@
 | `idleDelayMs` | `15000` | 空闲后延迟注入 |
 | `minIntervalMs` | `30000` | 同会话最小续跑间隔 |
 | `maxConsecutive` | `20` | 单轮值守最大注入次数（0=不限制）。任一注入（错误恢复/周期检查/完成复查/验证失败）都计入 |
-| `watchTimeoutMs` | `0` | 单轮值守最长时长（ms），超时自动 `stopped`。`0` = 无期限（区别于每日 `endTime` 窗口） |
+| `watchTimeoutMs` | `86400000`（24h，**v0.5.2 默认值变更**，原为 `0`） | 单轮值守最长时长（ms），超时自动 `stopped`。`0` = 无期限（区别于每日 `endTime` 窗口） |
 | `completionMarkers` | `["[任务完成]", "[夜间任务完成]", "[task done]", "<promise>DONE</promise>", "<promise>LOOP_DONE</promise>"]` | 完成标记。**任一命中触发完成流程**（见 `finalCheckEnabled`）。**空数组 `[]` = 不检测完成标记**（会话持续值守） |
 | `markerRegex` | 空 | 完全自定义完成标记正则（优先于 `completionMarkers`） |
 | `finalCheckEnabled` | `true` | 完成标记命中后，注入 `finalCheckMessage` 进入复查轮（confirming）；复查完成（再次命中标记）才 `done`。`false` = 标记命中直接 `done` |
@@ -34,7 +34,7 @@
 |---|---|---|
 | `verifyCommand` | 空 | 验证命令；**空 = 关闭验证驱动 Loop**（行为与仅完成标记一致）。非空时仅当检测到完成信号（完成标记 / `<promise>LOOP_DONE</promise>`）才运行该命令，按 **exit code** 判定完成 |
 | `verifyTimeoutMs` | `120000` | 单次验证超时；钳制 `1000`..`3600000`（1s..3600s） |
-| `verifyMaxIterations` | `0` | 失败轮次上限；`0` = 不限；钳制 `0`..`10000` |
+| `verifyMaxIterations` | `50`（**v0.5.2 默认值变更**，原为 `0`） | 失败轮次上限；`0` = 不限；钳制 `0`..`10000` |
 | `verifyCwd` | 空 | 验证工作目录；空 = 会话/项目目录（`ctx.location.directory`） |
 | `selfEchoWindowMs` | `10000` | 自回声窗口：窗口内与上次注入文本相同的入站「用户」消息视为自身回声，不计入真实用户轮 |
 | `abortSentinelTag` | `"loop-abort"` | 成对**中止**标签名（`<loop-abort>…</loop-abort>`）；空串禁用。命中 → 会话停止 |
@@ -47,6 +47,19 @@
 > v0.5.0 **移除** `escalationMessages`（原「整条替换两档」），改为「基础 `message` + 轮次压力梯 + 阈值追加」。
 > 哨兵判定顺序固定为 **abort → pause → done**，且只读 assistant 消息文本，绝不扫描验证命令输出（验证输出视为不可信数据）。
 
+## 挫败感触发与无人值守护栏（v0.5.2）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `frustrationTriggers` | `[]` | 真实用户消息中出现这些**子串**（大小写不敏感）即视为「质量不满」；**空数组 = 功能关闭**（默认关闭） |
+| `frustrationMessage` | `用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。` | 命中后追加到**下一次注入**末尾的提醒句；仅在 `frustrationTriggers` 非空时生效 |
+
+- 命中后**不新开一轮**：只把提醒句追加到本来就要发的下一次注入（追加发生在实际发送之前）。
+- 合并语义：数组**替换**（同 `escalationPressureLadder`），字符串**覆盖**。
+- 匹配只看**真实用户**消息，插件自身注入的回声不触发。
+
+**默认上界（v0.5.2 默认值变更）**：`watchTimeoutMs` 默认由 `0` 改为 `86400000`（24h），`verifyMaxIterations` 默认由 `0` 改为 `50`；两者**显式写 `0` 仍表示无限**（即仍可恢复无限值守 / 无限验证轮次，误配置时需留意）。
+
 ## 完整示例
 
 ```jsonc
@@ -58,7 +71,7 @@
   "idleDelayMs": 15000,
   "minIntervalMs": 30000,
   "maxConsecutive": 20,
-  "watchTimeoutMs": 0,
+  "watchTimeoutMs": 86400000,
   "completionMarkers": ["[任务完成]", "[夜间任务完成]", "[task done]", "<promise>DONE</promise>", "<promise>LOOP_DONE</promise>"],
   "finalCheckEnabled": true,
   "finalCheckMessage": "请整体检查一遍项目是否存在遗漏或 bug，并同步整理项目相关文档。检查完毕确认无误后，输出完成标记。",
@@ -70,10 +83,12 @@
   "markerRegex": "",
   "verifyCommand": "",
   "verifyTimeoutMs": 120000,
-  "verifyMaxIterations": 0,
+  "verifyMaxIterations": 50,
   "abortSentinelTag": "loop-abort",
   "pauseSentinelTag": "loop-pause",
-  "observeToolFailures": false
+  "observeToolFailures": false,
+  "frustrationTriggers": [],
+  "frustrationMessage": "用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。"
 }
 ```
 

@@ -361,6 +361,29 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 - `runVerifyGate` 失败分支：`const prompt = composeRejectionPrompt(cfg, rejections)`，
   注入 `` `${prompt}\n\n${detail}` ``。
 
+### 7.3.1 与 dsh-pua 原版的语义偏差（有意保留）
+
+以下两处与原版**不等价**，均为有意为之，记录在此以免后续被误判为「移植遗漏」：
+
+1. **压力梯的挂载变量不同。** 3/7/15/30/50 这组阈值取自 dsh-pua 的**迭代计数**表
+   （`src/runtime.ts:636-649`，`loop.iteration` 递增后取档），但我方的触发变量是
+   **验证拒绝数**（`src/engine.ts:157-173` 取档，`src/engine.ts:415-416` 递增）。
+   **保留「按拒绝数」**：在我方设计中只有「独立检查判定不通过」才与原版的迭代语义
+   等价——`loop.iteration` 把未经验证的续跑轮次也计入，噪声更大。
+   **代价必须写明**：我方的压力升级在**墙钟意义上比 dsh-pua 更晚**。
+   dsh-pua 另有一张按拒绝数分的 3 档表
+   （`assets/pua/upstream/skills/pua-loop/SKILL.md:57-63`），我方 `≥3` / `≥5`
+   两档阈值即取自该表。
+2. **阈值是叠加而非互斥。** dsh-pua 用 `else-if`
+   （`src/runtime.ts:614-618`：≥5 只给根因句、REASSESS 被丢掉）；我方在 ≥5 时
+   **两条都加**（`src/engine.ts:181-182`）。**保留叠加**：「列 3 个不同假设」与
+   「你可能在解决错误的问题」互补不矛盾，且最深档最需要双提示。
+   行为已由 `test/server.test.ts` 的 `composeRejectionPrompt` 用例锁定。
+
+补充：dsh-pua 的**风味语气线**（15 套大厂话术、每套 4 档）与我方的
+`escalationPressureLadder`（6 档通用压力句）不是同一物——前者是**企业修辞**，
+未移植，裁定见 §9.2。
+
 ### 7.4 ④ 验证状态进 TUI/RPC
 
 **契约**（`src/rpc.ts`）：
@@ -521,3 +544,144 @@ stdout/stderr 改用 `new StringDecoder("utf8")`（每个流一个）`.write(chu
 `architecture/overview.md` 与 `docs/README.md`（footer 符号、测试数、侧栏块）、
 `decisions/known-issues.md`（F3 反射风险、F13 延迟）、`decisions/roadmap.md`、`decisions/changelog.md`（0.5.1 行 + 修正 0.5.0 计数）。
 本文件 §3.5 关于 `escalationMessages` 的现行描述一并更正为「已于 v0.5.0 移除」。
+
+---
+
+## 9. 第四轮（v0.5.2）：风格机制评估落地 + 无人值守护栏
+
+> 范围：对 dsh-pua 的「风格」机制做完整取证与借鉴评估（@librarian 逐文件事实清单
+> @ `main`@`26ed406` + @oracle 独立取舍评估），按用户裁定落地 **P1 文档记录 /
+> P2 缩减版挫败感触发 / P3 无人值守护栏**。
+
+### 9.1 dsh-pua 风格机制全清单（事实，基线 `26ed406` = 当前 `main` HEAD）
+
+两条风格轴 + 三层状态驱动：
+
+| # | 机制 | 出处 | 变化维度 | 数量 |
+|---|---|---|---|---|
+| A1 | **风味 Flavor** | `src/flavors.ts:2-18`、`flavor-helper.sh:111-261` | 语气线 `PUA_L1..L4` + 关键词表 + 方法论 md | 15 套 |
+| A2 | **模式 Mode** | `src/content.ts:5-6` | 人设 / 角色层级 / 语言 | 11 种（真语气变体：`yes` `mama` `shot` `pua-en` `pua-ja`） |
+| A3 | **挫败感质量纠偏** | `frustration-trigger.sh:33`、`runtime.ts:207-210` | 命中真实用户抱怨 → 注入纠偏提示 | 1 模板 × 15 语气线 |
+| A4 | **失败升级候选 L1–L4** | `hook-content.ts:35-58`、`failure-detector.sh:182-261` | 连续终态失败 2→L1 / 3→L2 / 4→L3 / 5+→L4，含强制动作块与风道路由块 | 4 档 × 15 风味 |
+| A5 | **Loop 迭代压力** | `runtime.ts:636-649` | 2-3/4-7/8-15/16-30/31-50/51+ | 6 档 |
+| A6 | **Oracle 拒绝升级** | `runtime.ts:612-618` | 1-2 基础 / 3-4 REASSESS / 5+ 退回需求 | 3 档 |
+
+附带事实：上游 `flavor-helper.sh:263-299` 的 16 条 `PUA_LANGUAGE=zh` 中文覆盖语气线，
+在 DSH 移植里是**死代码**（`hook-content.ts:20` 的正则只匹配 4 空格缩进的顶层 case）。
+dsh-pua 的 i18n **只覆盖 UI**（`src/i18n.ts:4`「模型侧 prompt 与服务端回复不在本地化范围」），
+英/日语境是独立整篇 skill（`pua-en` 344 行 / `pua-ja` 278 行）。
+
+### 9.2 逐项裁定
+
+| 候选 | 裁定 | 决定性理由 |
+|---|---|---|
+| 风味 / 方法论预设 / 味道路由 | **不移植** | 需 `ctx.systemPrompt.section` / `ctx.commands.register`（dsh-pua `src/index.ts:37-70`）；我方 `ServerContext` 只有 storage / `session.prompt|synthetic|hook|context|get` / `event.subscribe` / `rpc.register`（`src/index.ts:14-48`）。且 dsh-pua 的 auto 路由**不是代码算的**——是把 `methodology-router.md` 塞进 prompt 让模型路由，与我方「零模型成本」冲突 |
+| 人设 P7/P9/P10 + verifier/self-reviewer/policy-guardian | **不移植** | 需 agent 注册 / 子代理派生；且我方验证门控**严格更强**（只认真实 exit code，`src/engine.ts:405-411`；dsh-pua 的 verifier 只出建议且禁改文件） |
+| A4 失败升级候选（L1-L4 + checklist） | **不移植** | 行为内容（五步法 / 七项 checklist / 结构化失败报告）我方用户现在就能贴进 `escalationPressureLadder`；其**自动选择器**依赖上述缺失 API。另：我方 `observeToolFailures` 只观测不行动，这一点的差距由 P3 的护栏部分补偿 |
+| i18n | **不移植** | dsh-pua 模型侧本就不本地化；我方 prompt 是用户自己的配置字符串 |
+| 降压换框 / 钉味提醒库 / stop-feedback | **不移植** | 降压由 **LLM 判定**（`de-escalation-protocol.md:17,90,121-124`）且需按风味说人话；钉味的**行为诉求**（「体感是输入，验收看证据链」）已被我方 exit-code 门控**机械覆盖**；stop-feedback 需 `jq` + `transcript_path` + 本地计数文件（`stop-feedback.sh:11,31-50`） |
+| **A3 挫败感触发** | **缩减后借鉴（P2）** | 唯一机械可移植：我方已能区分真实用户消息与自回声（`src/engine.ts:879-916`）。但 dsh-pua 把它**挂在同一轮**（`runtime.ts:207-210` 的 `decision.messages.push`），我方只有「新开一轮」的通道 → 降级为「装饰下一次本来就要发的注入」 |
+
+### 9.3 P1 文档记录
+
+- 本文件 §7.3.1：记录与 dsh-pua 的两处**语义偏差**（档位挂载变量、阈值叠加）。
+- `docs/decisions/roadmap.md`：不移植清单扩充为「风味/人设（15 套大厂味 + 味道路由）、
+  方法论预设、角色层级（P7/P9/P10/verifier/self-reviewer）、i18n、降压与换框协议、
+  钉味提醒库、feedback 问卷」；并把「挫败感触发」从「不移植」移入「缩减后借鉴」。
+- `docs/decisions/known-issues.md`：补记 P2 的启发式局限与 P3 上界可被显式关闭。
+
+### 9.4 P2 缩减版挫败感触发（规格）
+
+**配置**（`src/config.ts`）：
+
+```ts
+/** 真实用户消息中出现这些子串（大小写不敏感）即视为「质量不满」；空数组 = 功能关闭。 */
+frustrationTriggers: string[]
+/** 命中后追加到下一次注入末尾的提醒句；仅在 frustrationTriggers 非空时生效。 */
+frustrationMessage: string
+```
+
+- 默认：`frustrationTriggers: []`（**默认关闭**，与 `observeToolFailures: false` 同先例——
+  误判会把一句斥责塞进正常轮次）；`frustrationMessage` 默认文案：
+  `用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。`
+- 合并：数组**替换**（与 `escalationPressureLadder` 同规则：`:279-285`），字符串覆盖。
+
+**检测**（`src/engine.ts` 的真实用户消息分支）：
+
+- 位置：自回声 `break` **之后**（V2 分支 `engine.ts:880-883`、V1 分支 `engine.ts:906-909`），
+  确保插件自己的注入回流永远不会触发。
+- 文本来源：V2 `item.payload.text`（`engine.ts:874-875`）、V1 `messageText(info.parts)`（`engine.ts:903-905`）。
+- 匹配：**大小写不敏感的子串匹配**，不用正则、不搬运 dsh-pua 的正则表
+  （`frustration-trigger.sh:33` 含「加油/验收/闭环/口径」等过泛词）。命中任一子串即算命中。
+
+**副作用**：
+
+1. `InMemoryState` 新增 `frustrationPending: boolean`（`src/state.ts:13-38`，初值 `false`）。
+2. `WatchStore.resume(sessionID, recomputeEndAt = false, preserveRejections = false)` 新增第三参：
+   为 `true` 时**跳过** `entry.rejections = 0`，但**仍** `entry.roundId += 1`
+   （在飞的验证结果必须照常作废）。理由：用户抱怨本身就是「上一轮交付被否」的证据，
+   此时清零计数恰好是错的。
+3. 落点在 `injectAndRecord`（`src/engine.ts:307-316`）——所有注入的唯一漏斗：
+   若 `memory.frustrationPending && cfg.frustrationMessage` 非空，则
+   **在调用 `injectContinuation` 之前**把提醒句以 `\n\n` 追加到待发文本，并清标志。
+   必须在 `injectContinuation` 之前合成，保证自回声记录用的是**实际发送的文本**。
+
+### 9.5 P3 无人值守护栏（规格）
+
+**3a. 默认上界（`src/config.ts`）**：
+
+| 键 | 旧默认 | 新默认 | 语义 |
+|---|---|---|---|
+| `watchTimeoutMs` | `0` | `86_400_000`（24h） | `0` 仍表示「无墙钟上限」 |
+| `verifyMaxIterations` | `0` | `50` | `0` 仍表示「不限验证轮次」 |
+
+- 保留 `0 = 无限` 的语义，用户可显式写 `0` 恢复无限；这是**默认值变更**，
+  changelog 必须标注。
+- 取值理由：`watchTimeoutMs` 24h 覆盖跨午夜夜班（22:00→08:30 = 10.5h）且不误杀长任务；
+  `verifyMaxIterations` 50 在默认 `maxConsecutive: 20` 之上留出余量，
+  同时在 `maxConsecutive` 被设为 `0`（无限）时仍有一道护栏。
+
+**3b. 停止原因可观测（当前缺口）**：今天所有停止路径都只发 `state: "stopped"`，
+用户无法区分「被护栏停掉」「窗口到点」「用户主动中止」「模型 abort 哨兵」。
+新增 `stopReason`：
+
+```ts
+export type StopReason =
+  | "window-closed"    // 值守窗口（endTime）到点
+  | "watch-timeout"    // 墙钟上限 watchTimeoutMs
+  | "injection-cap"    // 注入次数上限 maxConsecutive
+  | "verify-limit"     // 验证失败次数上限 verifyMaxIterations
+  | "idle-interrupted" // 空闲轮被中断（模型报错 / 网络抖动）
+  | "user-interrupted" // 用户主动中止（Esc / session.execution.interrupted）
+  | "abort-sentinel"   // 模型输出 abort 哨兵
+```
+
+- `WatchState` 新增 `stopReason?: StopReason`（持久化字段，`src/state.ts`）。
+- `WatchStore.markStopped(sessionID, reason?: StopReason)` 写入原因。
+- 引擎各停止点传入对应原因（`engine.ts` 的 418 / 454 / 463 / 472 / 488 / 529 / 825 / 844）。
+- RPC：`WatchStatus`、`WatchStatusEvent` 与 `state.changed` schema 增 `stopReason`
+  （schema 用 `enum` 列出全部取值；`additionalProperties:false` 故必须显式声明）。
+- TUI：**footer 指示**（`[AC ⏹ N · 短语]`）与 **`/autocontinue status` 命令 toast** 显示原因文案
+  （人类可读，不直接暴露枚举值）。**侧栏块保持既有契约**——终态（`done`/`stopped`）不渲染侧栏
+  （`src/tui.tsx:249`），停止原因只出现在 footer 与 toast 两处。
+
+### 9.6 补测清单
+
+- `test/config-safety.test.ts`：新默认（24h / 50）断言；`frustrationTriggers` 数组替换、
+  空数组关闭；`frustrationMessage` 覆盖；非有限数值仍回退默认。
+- `test/server.test.ts`：挫败感真实用户消息 → 下一次注入含提醒句；非挫败 → 不含；
+  自回声 → 不触发；挫败感轮次 `rejections` **保留**、普通轮次**重置**；
+  各停止路径的 `stopReason` 正确（至少 `verify-limit` / `watch-timeout` / `injection-cap`）。
+- `test/tui-delivery.test.ts`：`stopped` 时渲染出原因文案。
+
+### 9.7 文档同步与发布
+
+- `features/config.md`：新增两键 + 两处默认值变更（含「默认上界」说明）。
+- `features/engine.md` / `features/footer.md`：停止原因展示。
+- `architecture/events-and-state.md`：持久化字段补 `stopReason`。
+- `decisions/known-issues.md`：P2 启发式局限（子串匹配可能误判/漏判）、
+  P3 上界可被显式置 0 关闭。
+- `decisions/changelog.md`：0.5.2 行。
+- `architecture/overview.md` / `docs/README.md`：测试数。
+- 发布：`src/` 有运行时改动 → bump `0.5.1` → `0.5.2`；脱敏扫描**独立成步、先读输出再推**；
+  `verify-install.ps1`。

@@ -50,6 +50,8 @@ interface WatchStatusView {
   verifying?: boolean
   /** Observed distinct tool failures in the current round (opt-in, display only). */
   toolFailureCount?: number
+  /** Why the round stopped (only present while state is "stopped"). */
+  stopReason?: string
 }
 
 type RpcClient = {
@@ -70,6 +72,27 @@ function formatDuration(ms: number): string {
   if (hours > 0) return `${hours}h ${minutes}m`
   if (minutes > 0) return `${minutes}m ${seconds}s`
   return `${seconds}s`
+}
+
+/** Human-readable phrases for the stop reasons reported by the server.
+ *  The TUI copy is English (see the "English-only labels" note above), so
+ *  these phrases follow the same convention. Unknown / missing reasons map
+ *  to undefined so the caller can omit the suffix entirely. */
+export const STOP_REASON_LABELS: Record<string, string> = {
+  "window-closed": "window closed",
+  "watch-timeout": "watch timeout",
+  "injection-cap": "injection cap",
+  "verify-limit": "verify limit",
+  "idle-interrupted": "interrupted while idle",
+  "user-interrupted": "stopped by user",
+  "abort-sentinel": "abort sentinel",
+}
+
+/** Short human-readable phrase for a stop reason, or undefined when there is
+ *  none (e.g. the user unwatched the session). */
+export function stopReasonLabel(reason: string | undefined): string | undefined {
+  if (reason === undefined) return undefined
+  return STOP_REASON_LABELS[reason]
 }
 
 export default Plugin.define({
@@ -186,7 +209,14 @@ export default Plugin.define({
         if (status === undefined) return null
         if (status.state === "done") return "[AC ✓]"
         if (status.state === "paused") return "[AC ⏸]"
-        if (status.state === "stopped") return `[AC ⏹ ${status.injections}]`
+        if (status.state === "stopped") {
+          // The stop reason is shown here and in the /autocontinue status
+          // toast only — the sidebar block never renders terminal states.
+          const phrase = stopReasonLabel(status.stopReason)
+          return phrase === undefined
+            ? `[AC ⏹ ${status.injections}]`
+            : `[AC ⏹ ${status.injections} · ${phrase}]`
+        }
         return "[AC ●]"
       })
       return <text>{() => label()}</text>
@@ -402,9 +432,17 @@ export default Plugin.define({
                           const result = await rpc.status({ sessionID })
                           if (result.watched && result.state) {
                             updateStatus(sessionID, result.state)
+                            // A stopped round carries a short human-readable
+                            // reason phrase (footer + toast are the only two
+                            // surfaces that show it).
+                            const stopPhrase =
+                              result.state.state === "stopped"
+                                ? stopReasonLabel(result.state.stopReason)
+                                : undefined
+                            const stopSuffix = stopPhrase === undefined ? "" : ` · ${stopPhrase}`
                             showToast(
                               "Autocontinue",
-                              `Watching · ${result.state.state} · ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}`,
+                              `Watching · ${result.state.state} · ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
                               "info",
                             )
                           } else {
@@ -458,10 +496,29 @@ export default Plugin.define({
           const verifying: boolean | undefined = event?.data?.verifying ?? event?.properties?.verifying
           const toolFailureCount: number | undefined =
             event?.data?.toolFailureCount ?? event?.properties?.toolFailureCount
+          const stopReason: string | undefined = event?.data?.stopReason ?? event?.properties?.stopReason
           if (typeof sessionID !== "string") return
           if (state === "stopped") {
             // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
             // 用 RPC status 复查区分：unwatch 后 status.watched=false → 清空本地信号。
+            // A guardrail stop carries its reason in the event: merge it now so
+            // the footer can show the phrase without waiting for the RPC
+            // round-trip. A plain unwatch carries no reason — nothing is
+            // merged, and the status re-check below clears the local entry.
+            if (typeof stopReason === "string") {
+              const current = statusOf(sessionID)
+              updateStatus(sessionID, {
+                ...(current ?? {}),
+                sessionID,
+                state,
+                injections,
+                ...(typeof totalInjections === "number" ? { totalInjections } : {}),
+                ...(typeof rejections === "number" ? { rejections } : {}),
+                ...(typeof verifying === "boolean" ? { verifying } : {}),
+                ...(typeof toolFailureCount === "number" ? { toolFailureCount } : {}),
+                stopReason,
+              })
+            }
             void refreshStatus(sessionID)
           } else if (
             state === "watching" ||
@@ -484,6 +541,9 @@ export default Plugin.define({
               ...(typeof rejections === "number" ? { rejections } : {}),
               ...(typeof verifying === "boolean" ? { verifying } : {}),
               ...(typeof toolFailureCount === "number" ? { toolFailureCount } : {}),
+              // A live / done round carries no stop reason — drop any stale
+              // one left over from an earlier stopped round.
+              stopReason: undefined,
             })
           }
         })

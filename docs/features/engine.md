@@ -46,6 +46,24 @@ metadata（`origin: "opencode-autocontinue"`），使注入回流不被误判为
 | 用户主动中止 | `session.execution.interrupted`（V2）/ `session.idle` 且 `outcome="interrupted"`（V1，Esc 手工停止）→ 停止但保留值守标记（可重新 on）。`MessageAbortedError` / `operation was aborted` 属 `excludePatterns`（不自动续跑的错误特征），并非停止来源 |
 | 模型终止/暂停哨兵 | `<loop-abort>…</loop-abort>` → `stopped`；`<loop-pause>…</loop-pause>` → `paused`（成对标签，仅读 assistant 文本） |
 
+## 停止原因（v0.5.2）
+
+所有停止路径都会带上一个 `stopReason`（持久化在 watch 状态里，**只在 `stopped` 行存在**），用于回答「为什么停」：
+
+| `stopReason` | 触发点 |
+|---|---|
+| `window-closed` | 值守窗口到点（每日 `endTime` / 冻结的 `endAt`） |
+| `watch-timeout` | 墙钟上限 `watchTimeoutMs` 到期（默认 24h） |
+| `injection-cap` | 注入次数达 `maxConsecutive`（默认 20） |
+| `verify-limit` | 验证失败次数达 `verifyMaxIterations`（默认 50） |
+| `idle-interrupted` | 空闲轮被中断（模型报错 / 网络抖动） |
+| `user-interrupted` | 用户主动中止（Esc / `session.execution.interrupted`） |
+| `abort-sentinel` | 模型输出 abort 哨兵 `<loop-abort>…</loop-abort>` |
+
+- **护栏停止一律是 `stopped`，绝不是 `done`**：次数上限 / 墙钟上限 / 窗口关闭 / 验证上限都只表示「不再续跑」，不表示任务完成。`done` 仅由完成信号判定（verify 模式下还需验证命令 exit code 为 0）。
+- `stopReason` 经 RPC（`WatchStatus` / `state.changed`）传给 TUI，UI 只显示人类可读文案，不暴露枚举值。
+- 设计依据见 [provenance-and-loop.md §9.5](../architecture/provenance-and-loop.md)。
+
 ## 防重 / 防冲突
 
 - **单实例续跑**：同一会话同一时刻只允许一个在途注入（`inFlight` 锁）
