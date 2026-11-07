@@ -4,12 +4,16 @@
 // guards fail loudly if someone reintroduces a parasitic solid copy
 // (solid-js/dist deep-path import), a peerDependencies shadow copy, a stale
 // bundle, or an exports entry that bypasses the bundle.
-// Run: node --test test/server.test.ts test/session-resolution.test.ts test/tui-delivery.test.ts
+// Run: node --experimental-strip-types --test test/tui-delivery.test.ts
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync, existsSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
+// The canonical stop-reason list lives in src/rpc.ts — the TUI label map is
+// compared against it instead of a local copy, so a new reason cannot be
+// added to the server without a matching TUI phrase.
+import { STOP_REASONS } from "../src/rpc.ts"
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -82,16 +86,6 @@ test("dist/tui.js is not a stale build (src marker is inside the bundle)", () =>
 // the footer indicator and the /autocontinue status toast. The right sidebar
 // keeps its existing contract — terminal states are NOT rendered there.
 
-const STOP_REASONS = [
-  "window-closed",
-  "watch-timeout",
-  "injection-cap",
-  "verify-limit",
-  "idle-interrupted",
-  "user-interrupted",
-  "abort-sentinel",
-]
-
 /**
  * src/tui.tsx is TSX and imports host-provided externals (@opencode/plugin/tui,
  * solid-js), so the test harness cannot import it directly (node's type
@@ -127,7 +121,33 @@ test("stopReasonLabel maps every known stop reason to a non-empty phrase", () =>
     assert.ok(typeof phrase === "string" && phrase.length > 0, `${reason} must map to a non-empty phrase`)
     assert.equal(phrase, labels[reason], `${reason} must resolve to its mapped phrase`)
   }
-  assert.equal(Object.keys(labels).length, STOP_REASONS.length, "the label map must cover exactly the seven stop reasons")
+  assert.equal(
+    Object.keys(labels).length,
+    STOP_REASONS.length,
+    "the label map must cover exactly the eight stop reasons",
+  )
+})
+
+test("the TUI label map covers exactly the stop reasons defined by src/rpc.ts", () => {
+  const { labels } = loadStopReasonHelpers(readRepo("src/tui.tsx"))
+  // No more, no less: a label without a reason is dead copy, a reason without
+  // a label would render the bare footer without a phrase.
+  assert.deepEqual(
+    Object.keys(labels).sort(),
+    [...STOP_REASONS].sort(),
+    "the TUI label map keys must match STOP_REASONS exactly",
+  )
+  for (const reason of STOP_REASONS) {
+    const phrase = labels[reason]
+    assert.equal(typeof phrase, "string", `${reason} must have a label`)
+    assert.ok(phrase.length > 0, `${reason} must have a non-empty phrase`)
+  }
+})
+
+test("the title-excluded reason renders as the phrase 'title excluded'", () => {
+  const { labels, label } = loadStopReasonHelpers(readRepo("src/tui.tsx"))
+  assert.equal(labels["title-excluded"], "title excluded")
+  assert.equal(label("title-excluded"), "title excluded")
 })
 
 test("stopReasonLabel returns undefined for an unknown or missing reason", () => {

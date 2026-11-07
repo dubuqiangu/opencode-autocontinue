@@ -10,15 +10,29 @@
 |---|---|---|
 | 值守中 | `[AC ●]` | 当前会话已 `/autocontinue on`，正在值守 |
 | 已完成 | `[AC ✓]` | 助手消息命中完成标记，已停止续跑 |
-| 已暂停 | `[AC ⏸]` | 模型输出 `<loop-pause>…</loop-pause>`，暂停等待用户补充（用户新消息后恢复） |
-| 已停止 | `[AC ⏹ N]` | 达最大续跑次数 / 时段窗口关闭 / 模型输出 `<loop-abort>…</loop-abort>` 而停止，N = 已续跑次数 |
+| 已暂停 | `[AC ⏸]` | 模型输出 `<loop-pause>…</loop-pause>`，暂停等待用户补充（用户新消息后恢复）。**`⏸` 是暂停，不是停止** |
+| 已停止 | `[AC ⏹ N]` | 达最大续跑次数 / 时段窗口关闭 / 墙钟超时 / 验证上限 / 中止等护栏触发，N = 已续跑次数 |
+| 已停止（带原因） | `[AC ⏹ N · <phrase>]` | 同上，且该停止路径带有 `stopReason`，`·` 后跟人类可读的英文短语 |
 
 未值守的会话不渲染任何 footer 指示（返回 null，不占位）。
 
-### 停止原因文案（v0.5.2）
+### 停止原因文案
 
-- 会话处于 `stopped` 时，UI 显示**人类可读的停止原因**（如「已达最大注入次数」「值守窗口已关闭」「验证连续失败已达上限」），**不直接暴露 `stopReason` 的原始枚举值**（`injection-cap` / `window-closed` / `verify-limit` …）。
-- 文案出现在 footer 的已停止指示与 `/autocontinue status` 的命令 toast；原因随 `state.changed` 事件携带的 `stopReason` 字段实时写回。
+- 会话处于 `stopped` 时，UI 显示**人类可读的停止原因短语**（英文，如 `injection cap`、`window closed`），**不直接暴露 `stopReason` 的原始枚举值**（`injection-cap` / `window-closed` / `verify-limit` …）。
+- 文案出现在 footer 的已停止指示与 `/autocontinue status` 的命令 toast（stopped 轮追加 ` · <phrase>`）；原因随 `state.changed` 事件携带的 `stopReason` 字段实时写回。
+
+**8 个停止原因短语对照表（v0.5.3 补齐 `title excluded`）：**
+
+| `stopReason` | UI 短语（原文） | 一句话解释 |
+|---|---|---|
+| `window-closed` | `window closed` | 值守时段窗口到点（每日 `endTime` / 冻结的 `endAt`） |
+| `watch-timeout` | `watch timeout` | 墙钟上限 `watchTimeoutMs` 到期（默认 24h） |
+| `injection-cap` | `injection cap` | 注入次数达 `maxConsecutive`（默认 20） |
+| `verify-limit` | `verify limit` | 验证失败轮次达 `verifyMaxIterations`（默认 50） |
+| `idle-interrupted` | `interrupted while idle` | 空闲轮被中断（模型报错 / 网络抖动） |
+| `user-interrupted` | `stopped by user` | 用户主动中止（Esc / `session.execution.interrupted`） |
+| `abort-sentinel` | `abort sentinel` | 模型输出 abort 哨兵 `<loop-abort>…</loop-abort>` |
+| `title-excluded` | `title excluded` | 会话标题命中 `excludeTitleKeywords`（默认含 `测试`），该会话不续跑 |
 
 ## 右侧栏值守块
 
@@ -26,13 +40,15 @@
 
 | 状态 | 显示 | 条件 |
 |---|---|---|
-| 值守中 | `Watch` + `⏱ 3m 22s` / `🔁 N injections` / `🎯 watching\|confirming` | 值守进行中（`watching` / 复查轮 `confirming`），⏱ 为已值守时长 |
+| 值守中 | `Watch` + `⏱ 3m 22s` / `🔄 N injections` / `🎯 watching\|confirming` | 值守进行中（`watching` / 复查轮 `confirming`），⏱ 为已值守时长 |
+| 值守中（注入计数补充） | `🔄 N injections (M this round)` | 括号内 M 为**本轮**（自上次真实用户消息起）的注入数；累计数与本轮数相同时不显示括号后缀 |
 | 值守中（附加行，仅有值时） | `🔍 verifying` / `🚫 N rejection(s)` / `🛠 N tool failure(s)` | 验证命令运行中 / 本轮验证被拒次数 / 启用 `observeToolFailures` 时的工具失败观测计数 |
 | 终态 / 未值守 | 不渲染（返回 null，不占位） | `done` / `stopped` / `paused`，或未 `/autocontinue on` |
 
 - 全英文标签（图标 + 英文单词），与 usage-meter 右侧栏风格一致
+- 注入计数用 **🔄**（U+1F504），不是 🔁
 - `⏱` 时长每 1s 刷新（状态为 `watching` / `confirming` 时跑定时器）
-- 侧栏块只承载"值守进行中"；终态/暂停反馈由 footer 指示符（`[AC ✓]` / `[AC ⏸]` / `[AC ⏹ N]`）与命令 toast 承载——终态行曾在此渲染且跨重启复活，导致每个历史值守过的会话常驻 Watch 块（v0.3.6 修复）
+- 侧栏块只承载"值守进行中"；终态/暂停反馈由 footer 指示符（`[AC ✓]` / `[AC ⏸]` / `[AC ⏹ N]` / `[AC ⏹ N · <phrase>]`）与命令 toast 承载——终态行曾在此渲染且跨重启复活，导致每个历史值守过的会话常驻 Watch 块（v0.3.6 修复）
 - **标题可折叠**（v0.3.9）：点击 `▼ Watch` 标题行立即收起为 `▸ Watch`，再点展开；折叠状态存 setup 作用域（v0.3.10），宿主重挂载侧栏不重置（重挂载重置曾让折叠像失效）
 
 ## 刷新机制
@@ -44,5 +60,5 @@
 
 ## 配套反馈
 
-- 开启/关闭/续跑注入/停止/出错时 toast 提示（全英文）
-- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N injection(s)` 或 `Not watching`
+- 开启/关闭/续跑注入/停止/出错时 toast 提示（全英文，标题固定为 `Autocontinue`）：开启 `Watch enabled (watching)`、关闭 `Watch disabled`
+- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N injection(s)`（stopped 轮追加 ` · <phrase>`）或 `Not watching`

@@ -4,6 +4,16 @@ import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 
 // src/rpc.ts
 var AUTOCONTINUE_RPC_ID = "autocontinue";
+var STOP_REASONS = [
+  "window-closed",
+  "watch-timeout",
+  "injection-cap",
+  "verify-limit",
+  "idle-interrupted",
+  "user-interrupted",
+  "abort-sentinel",
+  "title-excluded"
+];
 var AUTOCONTINUE_RPC_CONTRACT = {
   id: AUTOCONTINUE_RPC_ID,
   methods: {
@@ -46,15 +56,7 @@ var AUTOCONTINUE_RPC_CONTRACT = {
               toolFailureCount: { type: "number" },
               stopReason: {
                 type: "string",
-                enum: [
-                  "window-closed",
-                  "watch-timeout",
-                  "injection-cap",
-                  "verify-limit",
-                  "idle-interrupted",
-                  "user-interrupted",
-                  "abort-sentinel"
-                ]
+                enum: [...STOP_REASONS]
               }
             },
             required: ["sessionID", "state", "injections", "totalInjections", "since"],
@@ -89,15 +91,7 @@ var AUTOCONTINUE_RPC_CONTRACT = {
           toolFailureCount: { type: "number" },
           stopReason: {
             type: "string",
-            enum: [
-              "window-closed",
-              "watch-timeout",
-              "injection-cap",
-              "verify-limit",
-              "idle-interrupted",
-              "user-interrupted",
-              "abort-sentinel"
-            ]
+            enum: [...STOP_REASONS]
           }
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
@@ -169,7 +163,8 @@ var STOP_REASON_LABELS = {
   "verify-limit": "verify limit",
   "idle-interrupted": "interrupted while idle",
   "user-interrupted": "stopped by user",
-  "abort-sentinel": "abort sentinel"
+  "abort-sentinel": "abort sentinel",
+  "title-excluded": "title excluded"
 };
 function stopReasonLabel(reason) {
   if (reason === void 0) return void 0;

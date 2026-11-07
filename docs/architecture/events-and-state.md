@@ -38,6 +38,7 @@ server storage（`ctx.storage.set/get`，跨重启）：
       "totalInjections": 5,
       "rejections": 0,
       "roundId": 2,
+      "roundSince": 1730000000000,
       "lastInjectedAt": 1730000060000,
       "state": "watching|confirming|stopped|paused|done",
       "stopReason": "window-closed|watch-timeout|injection-cap|verify-limit|idle-interrupted|user-interrupted|abort-sentinel"
@@ -49,9 +50,12 @@ server storage（`ctx.storage.set/get`，跨重启）：
 - `watched` 键由 `/autocontinue on` 写入、`off` 删除
 - `injections` 本轮注入计数（真实用户消息 `resume()` 归零，驱动 `maxConsecutive`）；`totalInjections` 本次 watch 起的累计（不随用户消息清零）
 - `rejections` 本轮验证失败次数；`roundId` 轮次标识（`resume()` +1，用于丢弃陈旧验证结果）。旧字段 `consecutive` 已于 v0.3.0 移除
+- `roundSince` 本轮时间锚点（epoch 毫秒）：按轮次计量的墙钟预算基准，由 `watch()` 置位，真实用户消息开启新一轮时刷新（此时 `since` 保持不变）；hydrate 旧数据时该字段缺失则回退到 `since`。属内部字段，不通过 `status()` / `list()` 对外暴露
 - `state` 联合 `watching | confirming | stopped | paused | done`；hydrate 保留 `paused`（等待用户输入的活动值守），丢弃终态 `done` / `stopped`
 - `stopReason` 停止原因（**可选**）：**仅 `stopped` 行存在**，取值 `window-closed`（值守窗口到点）/ `watch-timeout`（墙钟上限）/ `injection-cap`（注入次数上限）/ `verify-limit`（验证失败次数上限）/ `idle-interrupted`（空闲轮被中断）/ `user-interrupted`（用户主动中止）/ `abort-sentinel`（模型输出 abort 哨兵）；其余状态不带此字段。护栏停止一律记为 `stopped`，绝不记为 `done`（v0.5.2）
 - 内存态另含 `inFlight` / `pendingContinue` / `verifying` 等锁（不持久化）
+
+> `roundId` 与 `roundSince` 的分工：`roundId` 是单调递增的轮次**标识**，用于判定验证结果是否来自已被取代的旧轮次并将其丢弃；`roundSince` 是轮次起始的**时间锚点**，用于计算按轮次的墙钟预算（`watchTimeoutMs`）。前者解决「结果是否过期」，后者解决「本轮还剩多少时间」，二者不互相替代。
 
 ## 状态机
 

@@ -1,7 +1,7 @@
 // Watch state for opencode-autocontinue.
 // Persisted via ctx.storage (cross-restart); in-memory locks live only in this process.
 
-import type { WatchState, WatchStatus } from "./rpc.ts"
+import { STOP_REASONS, type StopReason, type WatchState, type WatchStatus } from "./rpc.ts"
 
 export interface StorageLike {
   get(key: string): Promise<unknown>
@@ -11,25 +11,11 @@ export interface StorageLike {
 const STORAGE_KEY = "opencode-autocontinue.watched"
 
 /** Why a watch round stopped. Persisted with the watch state so the UI can
- *  tell a guardrail stop apart from a window close or a user abort. */
-export type StopReason =
-  | "window-closed"
-  | "watch-timeout"
-  | "injection-cap"
-  | "verify-limit"
-  | "idle-interrupted"
-  | "user-interrupted"
-  | "abort-sentinel"
-
-const STOP_REASONS: readonly StopReason[] = [
-  "window-closed",
-  "watch-timeout",
-  "injection-cap",
-  "verify-limit",
-  "idle-interrupted",
-  "user-interrupted",
-  "abort-sentinel",
-]
+ *  tell a guardrail stop apart from a window close or a user abort.
+ *  The canonical list lives in `src/rpc.ts` (shared with the TUI); it is
+ *  re-exported here so existing `src/state.ts` import paths keep working. */
+export type { StopReason }
+export { STOP_REASONS }
 
 /** Whether a persisted value is one of the known stop reasons. */
 export function isStopReason(value: unknown): value is StopReason {
@@ -100,12 +86,18 @@ export class WatchStore {
           const legacyTotal =
             (typeof legacyConsecutive === "number" ? legacyConsecutive : 0) +
             (typeof legacyHeartbeats === "number" ? legacyHeartbeats : 0)
+          const normalizedSince = typeof entry.since === "number" ? entry.since : now
           this.watched.set(sessionID, {
             sessionID,
             state: entry.state === "paused" ? "paused" : "watching",
             injections: typeof entry.injections === "number" ? entry.injections : legacyTotal,
             totalInjections: typeof entry.totalInjections === "number" ? entry.totalInjections : legacyTotal,
-            since: typeof entry.since === "number" ? entry.since : now,
+            since: normalizedSince,
+            // Rows persisted by v0.5.2 and earlier carry no roundSince: fall
+            // back to the row's `since` (which itself falls back to `now` when
+            // missing), so a legacy watch does not silently get a fresh,
+            // full-length wall-clock budget.
+            roundSince: typeof entry.roundSince === "number" ? entry.roundSince : normalizedSince,
             endAt: typeof entry.endAt === "number" ? entry.endAt : 0,
             // B-5: the field-by-field rebuild below would otherwise drop these
             // (or carry NaN from a legacy row), so normalize each explicitly.
@@ -172,6 +164,8 @@ export class WatchStore {
     const entry: WatchState = {
       sessionID,
       since: now,
+      // A fresh watch also starts the first round's wall-clock budget.
+      roundSince: now,
       injections: 0,
       totalInjections: 0,
       rejections: 0,
@@ -284,6 +278,11 @@ export class WatchStore {
     // round was rejected, so that counter is preserved.
     if (!preserveRejections) entry.rejections = 0
     entry.roundId += 1
+    // The wall-clock watch budget is measured per round: a new round starts a
+    // fresh budget instead of inheriting the previous round's remainder.
+    // `since` is deliberately NOT touched — it marks the start of the whole
+    // watch and drives the sidebar timer.
+    entry.roundSince = Date.now()
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
     const memory = this.inMemory.get(sessionID)

@@ -1,5 +1,5 @@
 // Safety tests for config parsing + merging (F4 non-finite numbers, F5 string-aware trailing commas).
-// Run: node --experimental-strip-types --test --test-force-exit test/config-safety.test.ts
+// Run: node --experimental-strip-types --test test/config-safety.test.ts
 
 import { test } from "node:test"
 import assert from "node:assert/strict"

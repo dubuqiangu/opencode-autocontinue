@@ -86,6 +86,7 @@ export const STOP_REASON_LABELS: Record<string, string> = {
   "idle-interrupted": "interrupted while idle",
   "user-interrupted": "stopped by user",
   "abort-sentinel": "abort sentinel",
+  "title-excluded": "title excluded",
 }
 
 /** Short human-readable phrase for a stop reason, or undefined when there is

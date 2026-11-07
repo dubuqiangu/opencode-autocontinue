@@ -29,11 +29,11 @@ OpenCode 后台服务（事件总线）
 server 插件（权威逻辑）
   retry hook → 错误改可重试+退避
   值守列表（ctx.storage 持久化）→ 判定 → 延迟/节流/次数/时段
-  session.prompt → 注入续跑消息
+  session.synthetic（优先）/ session.prompt（回退）→ 注入续跑消息
         │ autocontinue.state.changed 事件（RPC）
         ▼
 TUI 插件
-  footer.status slot → [AC ●] / [AC ✓] / [AC ⏸] / [AC ⏹ N]
+  footer.status slot → [AC ●] / [AC ✓] / [AC ⏸] / [AC ⏹ N] / [AC ⏹ N · 短语]
   sidebar.content slot → Watch 块（⏱ 时长 / 🔄 注入次数 / 🎯 状态 / 🔍 verifying / 🚫 rejections / 🛠 tool failures）
   /autocontinue 命令 → toast 反馈
 ```
@@ -44,7 +44,7 @@ TUI 插件
 
 ## 验证方式
 
-- **语法**：`node --check src/*.ts`（server 纯 TS）
-- **打包**：`npm run build:tui`（esbuild bundle `src/tui.tsx` → `dist/tui.js`，`@opencode/*`/`@opentui/*`/`solid-js` 全 external，`exports["./tui"]` 指向 bundle）
-- **单元测试**：`node --test test/*.test.ts`（覆盖解析/判定矩阵/节流/时段/排除/完成标记/并发/跨日窗口/验证 Loop/哨兵/配置健壮性/多字节解码/挫败感触发/停止原因）
-- **真机**：本地 `file://` 加载，重启后验证 on/status/off、错误/空闲注入、完成标记停止
+- **语法快检**：`node --experimental-strip-types --check src/<file>.ts`（逐文件执行；PowerShell 不展开 `src/*.ts` 这类 glob，所以不要写成通配一条命令）
+- **单元测试**：`npm test` —— 跑全部 12 个测试文件、251 个用例（server / config-safety / tui-delivery / verify-safety / session-resolution / index / rpc-contract / config-load / round-budget / keep-alive / guardrail-off / title-exclusion），覆盖解析、判定矩阵、节流、时段、排除、完成标记、并发、跨日窗口、验证 Loop、哨兵、配置健壮性、多字节解码、挫败感触发、停止原因，以及 **RPC 契约**、**server 入口装配**、**停止原因在 server 与 TUI 两侧的一致性**；跑完自行退出，不需要 `--test-force-exit`
+- **TUI 打包**：`npm run build:tui`（esbuild bundle `src/tui.tsx` → `dist/tui.js`，`@opencode/*`/`@opentui/*`/`solid-js` 全 external）。`dist/tui.js` 是 **TUI 侧的交付载体**——`exports["./tui"]` 指向它，改了 `src/tui.tsx` 不重新打包，TUI 侧不会生效
+- **真机**：`opencode plugin add github:dubuqiangu/opencode-autocontinue` → 完整重启 opencode → 会话内 `/autocontinue on`，然后确认 footer 出现 `[AC ●]`、`/autocontinue status` 正常、`/autocontinue off` 能关闭；错误/空闲注入与完成标记停止见 [任务清单](../../tasks.md)

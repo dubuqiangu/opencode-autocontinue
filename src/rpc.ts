@@ -2,9 +2,24 @@
 // Shared between server (implementer) and TUI (caller).
 // Events let the TUI refresh its footer status live.
 
-import type { StopReason } from "./state.ts"
-
 export const AUTOCONTINUE_RPC_ID = "autocontinue"
+
+/** Every reason a watch round can stop, in canonical order. Single source of
+ *  truth: the RPC schemas and the `StopReason` type below are derived from it,
+ *  and `src/state.ts` re-exports it for the server side. */
+export const STOP_REASONS = [
+  "window-closed",
+  "watch-timeout",
+  "injection-cap",
+  "verify-limit",
+  "idle-interrupted",
+  "user-interrupted",
+  "abort-sentinel",
+  "title-excluded",
+] as const
+
+/** Why a watch round stopped. */
+export type StopReason = (typeof STOP_REASONS)[number]
 
 /**
  * Runtime RPC contract shared by server (ctx.rpc.register) and TUI
@@ -61,15 +76,7 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
               toolFailureCount: { type: "number" },
               stopReason: {
                 type: "string",
-                enum: [
-                  "window-closed",
-                  "watch-timeout",
-                  "injection-cap",
-                  "verify-limit",
-                  "idle-interrupted",
-                  "user-interrupted",
-                  "abort-sentinel",
-                ],
+                enum: [...STOP_REASONS],
               },
             },
             required: ["sessionID", "state", "injections", "totalInjections", "since"],
@@ -104,15 +111,7 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
           toolFailureCount: { type: "number" },
           stopReason: {
             type: "string",
-            enum: [
-              "window-closed",
-              "watch-timeout",
-              "injection-cap",
-              "verify-limit",
-              "idle-interrupted",
-              "user-interrupted",
-              "abort-sentinel",
-            ],
+            enum: [...STOP_REASONS],
           },
         },
         required: ["sessionID", "state", "injections", "totalInjections"],
@@ -125,6 +124,14 @@ export const AUTOCONTINUE_RPC_CONTRACT = {
 export interface WatchState {
   sessionID: string
   since: number
+  /** Start of the CURRENT round (epoch ms). Unlike `since` — which marks the
+   *  beginning of this watch and drives the sidebar timer — this field is
+   *  refreshed on every resume(), so the wall-clock watch budget is measured
+   *  per round instead of cumulatively since the first `/autocontinue on`.
+   *  v0.5.2 and earlier accumulated the budget across rounds; v0.5.3 measures
+   *  each round on its own (a new round never inherits the previous round's
+   *  remaining budget). INTERNAL: not exposed via status()/list(). */
+  roundSince: number
   /** Injections in the CURRENT round (since the last real user message). Reset
    *  to 0 on resume(); drives the maxConsecutive self-throttle cap. */
   injections: number
@@ -207,14 +214,7 @@ export interface RpcContract {
           rejections: { type: "number" }
           verifying: { type: "boolean" }
           toolFailureCount: { type: "number" }
-          stopReason:
-            | "window-closed"
-            | "watch-timeout"
-            | "injection-cap"
-            | "verify-limit"
-            | "idle-interrupted"
-            | "user-interrupted"
-            | "abort-sentinel"
+          stopReason: StopReason
         }
         required: ["sessionID", "state", "injections", "totalInjections"]
         additionalProperties: false

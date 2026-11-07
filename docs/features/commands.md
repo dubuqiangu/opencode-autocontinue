@@ -17,12 +17,12 @@ TUI keymap slash 命令（/autocontinue on）
   → rpc.set({ enabled: true })          ← RPC id "autocontinue"
   → server 持久化到 ctx.storage
   → 事件 autocontinue.state.changed 广播
-  → TUI toast「Watch enabled」+ footer/侧栏刷新
+  → TUI toast「Watch enabled (watching)」+ footer/侧栏刷新
 ```
 
-- `on`：watch(sessionID)，写入 storage，计数归零；toast「Watch enabled」
+- `on`：watch(sessionID)，写入 storage，计数归零；toast「Watch enabled (watching)」（标题 `Autocontinue`）
 - `off`：unwatch(sessionID)，删除 storage 记录；toast「Watch disabled」
-- `status`：直接调 RPC 读当前会话状态（非经过期信号），`Watching · <state> · N injection(s)` / `Not watching`
+- `status`：直接调 RPC 读当前会话状态（非经过期信号），`Watching · <state> · N injection(s)` / `Not watching`；**stopped 轮追加 ` · <phrase>`**（停止原因短语，见 [footer.md](footer.md)）
 
 ## RPC 契约
 
@@ -30,7 +30,7 @@ TUI keymap slash 命令（/autocontinue on）
 |---|---|
 | id | `autocontinue` |
 | methods | `set{enabled}` / `status{perSession}` / `list` |
-| events | `state.changed{sessionID, state, injections, totalInjections, rejections?, verifying?, toolFailureCount?}` |
+| events | `state.changed{sessionID, state, injections, totalInjections, rejections?, verifying?, toolFailureCount?, stopReason?}` |
 
 ## 注意事项
 

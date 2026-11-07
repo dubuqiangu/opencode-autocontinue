@@ -418,7 +418,9 @@ export class AutocontinueEngine {
     if (!after || (after.state !== "watching" && after.state !== "confirming")) return
     if (after.roundId !== roundBefore) return
     if (after.endAt && Date.now() >= after.endAt) return
-    if (cfg.watchTimeoutMs > 0 && Date.now() - after.since >= cfg.watchTimeoutMs) return
+    // Wall-clock budget is measured per round (roundSince), not since the
+    // watch started (since) — see WatchState.roundSince.
+    if (cfg.watchTimeoutMs > 0 && Date.now() - after.roundSince >= cfg.watchTimeoutMs) return
 
     if (outcome.pass) {
       await this.store.markDone(sessionID)
@@ -476,8 +478,9 @@ export class AutocontinueEngine {
         return
       }
 
-      // Wall-clock watch budget (watchTimeoutMs = 0 means no limit).
-      if (cfg.watchTimeoutMs > 0 && Date.now() - entry.since >= cfg.watchTimeoutMs) {
+      // Wall-clock watch budget (watchTimeoutMs = 0 means no limit). Measured
+      // per round (roundSince), so a new user turn starts a fresh budget.
+      if (cfg.watchTimeoutMs > 0 && Date.now() - entry.roundSince >= cfg.watchTimeoutMs) {
         await this.store.markStopped(sessionID, "watch-timeout")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -503,7 +506,7 @@ export class AutocontinueEngine {
       // Session title exclusion.
       const title = await this.resolveTitle(sessionID)
       if (titleExcluded(title, cfg.excludeTitleKeywords)) {
-        await this.store.markStopped(sessionID)
+        await this.store.markStopped(sessionID, "title-excluded")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
         void this.emitChangedInternal(sessionID, "stopped")

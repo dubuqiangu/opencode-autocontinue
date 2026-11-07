@@ -1,6 +1,6 @@
 // Safety tests for src/verify.ts: the live stream output cap (§7.1) and the
 // real default-spawn integration path through runVerification.
-// Run: node --experimental-strip-types --test --test-force-exit test/verify-safety.test.ts
+// Run: node --experimental-strip-types --test test/verify-safety.test.ts
 
 import { test } from "node:test"
 import assert from "node:assert/strict"

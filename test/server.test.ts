@@ -1,7 +1,9 @@
 // Unit tests for opencode-autocontinue server logic.
-// Run: node --test test/*.test.mjs
+// Run: node --experimental-strip-types --test test/server.test.ts
+// The suite disposes every engine it creates (see the lifecycle registry
+// below), so the process exits on its own — no --test-force-exit needed.
 
-import { test } from "node:test"
+import { afterEach, test } from "node:test"
 import assert from "node:assert/strict"
 
 // --- config ---
@@ -155,6 +157,41 @@ import {
 } from "../src/verify.ts"
 import type { SpawnAdapter } from "../src/verify.ts"
 
+// --- engine lifecycle registry ---
+// Every AutocontinueEngine owns timers: scheduleInjection() arms a setTimeout
+// and scheduleInterval() arms a setInterval. Without an explicit dispose()
+// those handles stay referenced by the event loop and `node --test` never
+// returns (the suite used to hang forever after "tests passed").
+// createEngine() registers every instance and the afterEach hook disposes
+// them after each test, so the process terminates on its own.
+
+const liveEngines = new Set<AutocontinueEngine>()
+
+function createEngine(
+  session: unknown,
+  config: () => typeof DEFAULT_CONFIG,
+  store: WatchStore,
+  emitChanged: (event: any) => void,
+  verifyRunner?: (spec: any) => Promise<any>,
+  baseDirectory?: string,
+): AutocontinueEngine {
+  const engine = new AutocontinueEngine(
+    session as any,
+    config,
+    store,
+    emitChanged,
+    verifyRunner,
+    baseDirectory,
+  )
+  liveEngines.add(engine)
+  return engine
+}
+
+afterEach(() => {
+  for (const engine of liveEngines) engine.dispose()
+  liveEngines.clear()
+})
+
 class FakeStorage {
   private data = new Map<string, unknown>()
   async get(key: string) { return this.data.get(key) }
@@ -188,7 +225,7 @@ async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
     stopReason?: string
   }> = []
   const config = () => ({ ...DEFAULT_CONFIG, ...overrides })
-  const engine = new AutocontinueEngine(session as any, config, store, (event) => {
+  const engine = createEngine(session as any, config, store, (event) => {
     events.push({
       sessionID: event.sessionID,
       state: event.state,
@@ -330,7 +367,7 @@ test("completion marker with final check enabled runs the review round, not done
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_4")
@@ -352,7 +389,7 @@ test("completion marker with a running background subagent stays watching (no do
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_guard")
@@ -375,7 +412,7 @@ test("completion marker with a finished background subagent confirms normally", 
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_guard2")
@@ -443,7 +480,7 @@ test("idle does not inject when the model is asking a question", async () => {
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_a1")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_a1" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -464,7 +501,7 @@ test("idle does not inject while a tool call is in flight", async () => {
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_a2")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_a2" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -479,7 +516,7 @@ test("idle does not inject on a short acknowledgement", async () => {
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_a3")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_a3" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -492,7 +529,7 @@ test("title exclusion stops watching", async () => {
   session.context = async () => [{ info: { role: "user", title: "临时测试会话" } }]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_5")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_5" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -514,7 +551,7 @@ test("v2 message shape: completion marker is detected via content", async () => 
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_v2_marker")
@@ -533,7 +570,7 @@ test("v2 message shape: question detection skips injection", async () => {
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_v2_q")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_q" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -554,7 +591,7 @@ test("v2 message shape: tool_use without tool_result skips injection", async () 
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_v2_tool")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_tool" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -568,7 +605,7 @@ test("v2 title resolution via session.get stops watching", async () => {
   session.get = async () => ({ title: "测试会话" })
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_v2_title")
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_title" })
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -912,7 +949,7 @@ test("completion marker with final check injects the review message then confirm
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_fc1")
@@ -932,7 +969,7 @@ test("second completion marker while confirming marks done", async () => {
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_fc2")
@@ -952,7 +989,7 @@ test("completion marker with final check disabled marks done immediately", async
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, finalCheckEnabled: false }),
     store,
@@ -967,11 +1004,12 @@ test("completion marker with final check disabled marks done immediately", async
 
 test("watchTimeoutMs stops the round after the budget", async () => {
   const { session, store, engine, events } = await makeEngine({ intervalMs: 60_000, watchTimeoutMs: 5_000 })
-  // Start the watch 10s ago so the budget is already exceeded.
+  // Start the round 10s ago so the budget is already exceeded. The wall-clock
+  // budget is measured per round (roundSince), not since the watch started.
   const store2 = store
   await store2.watch("ses_wt1")
   const entry = store2.getState("ses_wt1")
-  if (entry) entry.since = Date.now() - 10_000
+  if (entry) entry.roundSince = Date.now() - 10_000
   await engine.maybeInject("ses_wt1")
   assert.equal(session.prompts.length, 0)
   assert.equal(store2.getState("ses_wt1")?.state, "stopped")
@@ -994,6 +1032,11 @@ test("hydrate normalizes legacy rows missing since/injections (P2-1)", async () 
   assert.equal(state.state?.injections, 5) // 2 consecutive + 3 heartbeats folded
   // lastInjectedAt must be omitted (null/undefined would fail the RPC schema).
   assert.equal(state.state?.lastInjectedAt, undefined)
+  assert.equal(
+    Object.hasOwn(state.state ?? {}, "lastInjectedAt"),
+    false,
+    "the key must be absent, not present with an undefined value",
+  )
 })
 
 test("hydrate drops persisted terminal rows and keeps active watches", async () => {
@@ -1090,7 +1133,7 @@ test("confirming does not mark done while the old marker message is still latest
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
     store,
@@ -1122,7 +1165,7 @@ test("confirming review reply without marker returns to watching (B2)", async ()
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
     store,
@@ -1153,7 +1196,7 @@ test("confirming second marker in a NEW assistant message marks done (B1 positiv
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, minIntervalMs: 0 }),
     store,
@@ -1568,7 +1611,7 @@ async function makeVerifyEngine(
     stopReason?: string
   }> = []
   const config = () => ({ ...DEFAULT_CONFIG, verifyCommand: "node --version", ...overrides })
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     config,
     store,
@@ -2109,7 +2152,7 @@ test("F6: a state.changed event carries toolFailureCount", async () => {
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: Array<{ toolFailureCount?: number }> = []
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, observeToolFailures: true }),
     store,
@@ -2142,7 +2185,7 @@ test("F7: a V1 tool_use + separate tool_result(is_error) counts one failure", as
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5, observeToolFailures: true }),
     store,
@@ -2164,7 +2207,7 @@ test("F8: an abort sentinel stops even while a background subagent is running", 
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(
+  const engine = createEngine(
     session as any,
     () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }),
     store,
@@ -2193,7 +2236,7 @@ test("abort wins over pause when both sentinels appear", async () => {
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_prec_abort")
   await engine.maybeInject("ses_prec_abort")
   assert.equal(store.getState("ses_prec_abort")?.state, "stopped")
@@ -2208,7 +2251,7 @@ test("a sentinel beats a completion marker in the same message", async () => {
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
   const events: string[] = []
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, (event) => {
     events.push(event.state)
   })
   await store.watch("ses_prec_marker")
@@ -2486,7 +2529,8 @@ test("the watch budget stopping the round reports stopReason watch-timeout", asy
   const { store, engine, events } = await makeEngine({ watchTimeoutMs: 5_000 })
   await store.watch("ses_reason_timeout")
   const entry = store.getState("ses_reason_timeout")
-  if (entry) entry.since = Date.now() - 10_000
+  // The wall-clock budget is measured per round (roundSince).
+  if (entry) entry.roundSince = Date.now() - 10_000
   await engine.maybeInject("ses_reason_timeout")
   assert.equal(store.getState("ses_reason_timeout")?.state, "stopped")
   assert.equal(store.getState("ses_reason_timeout")?.stopReason, "watch-timeout")
@@ -2521,7 +2565,7 @@ test("an abort sentinel reports stopReason abort-sentinel", async () => {
   ]
   const store = new WatchStore(new FakeStorage() as any)
   await store.hydrate()
-  const engine = new AutocontinueEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
+  const engine = createEngine(session as any, () => ({ ...DEFAULT_CONFIG, idleDelayMs: 5 }), store, () => {})
   await store.watch("ses_reason_abort")
   await engine.maybeInject("ses_reason_abort")
   assert.equal(store.getState("ses_reason_abort")?.stopReason, "abort-sentinel")
@@ -2544,9 +2588,24 @@ test("markStopped without a reason clears a previously stored stop reason", asyn
   await store.watch("ses_reason_cleared")
   await store.markStopped("ses_reason_cleared", "verify-limit")
   assert.equal(store.getState("ses_reason_cleared")?.stopReason, "verify-limit")
+  // A round that carries a reason exposes the key with the exact value.
+  assert.equal(Object.hasOwn(store.status("ses_reason_cleared").state ?? {}, "stopReason"), true)
+  assert.equal(store.status("ses_reason_cleared").state?.stopReason, "verify-limit")
+  assert.equal(
+    Object.hasOwn(store.list().find((row) => row.sessionID === "ses_reason_cleared") ?? {}, "stopReason"),
+    true,
+  )
   await store.markStopped("ses_reason_cleared")
   assert.equal(store.getState("ses_reason_cleared")?.stopReason, undefined)
   assert.equal(store.status("ses_reason_cleared").state?.stopReason, undefined)
+  // The RPC payload must OMIT the key, not carry an explicit undefined: the
+  // host schema is {type:"string"} with additionalProperties:false, so an
+  // explicit undefined value is rejected by the validator.
+  assert.equal(Object.hasOwn(store.status("ses_reason_cleared").state ?? {}, "stopReason"), false)
+  assert.equal(
+    Object.hasOwn(store.list().find((row) => row.sessionID === "ses_reason_cleared") ?? {}, "stopReason"),
+    false,
+  )
 })
 
 test("hydrate keeps a valid stop reason and drops an invalid one", async () => {

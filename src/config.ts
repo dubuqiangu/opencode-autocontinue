@@ -227,7 +227,18 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
     merged.minIntervalMs = overrides.minIntervalMs
   }
   if (typeof overrides.maxConsecutive === "number" && Number.isFinite(overrides.maxConsecutive)) {
-    merged.maxConsecutive = overrides.maxConsecutive
+    if (overrides.maxConsecutive >= 0) {
+      merged.maxConsecutive = overrides.maxConsecutive
+    } else {
+      // A negative cap is almost certainly a typo: the engine only enforces the
+      // limit when `maxConsecutive > 0`, so a negative value would silently
+      // cancel the only injection ceiling. Fall back to the base value, and to
+      // the shipped default when the base value is unusable as well.
+      merged.maxConsecutive =
+        Number.isFinite(base.maxConsecutive) && base.maxConsecutive >= 0
+          ? base.maxConsecutive
+          : DEFAULT_CONFIG.maxConsecutive
+    }
   }
   if (typeof overrides.watchTimeoutMs === "number" && Number.isFinite(overrides.watchTimeoutMs)) {
     merged.watchTimeoutMs = Math.max(0, overrides.watchTimeoutMs)
