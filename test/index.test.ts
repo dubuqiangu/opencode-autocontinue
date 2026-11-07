@@ -31,6 +31,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import plugin, { id, setup } from "../src/index.ts"
+import { DEFAULT_CONFIG } from "../src/config.ts"
 import { AUTOCONTINUE_RPC_CONTRACT, AUTOCONTINUE_RPC_ID } from "../src/rpc.ts"
 import type { EventLike } from "../src/events.ts"
 import { FakeStorage, makeFakeSession } from "./support/harness.ts"
@@ -315,7 +316,11 @@ test("the host event subscription drives an injection on session.idle", async ()
     await waitFor(() => session.prompts.length >= 1),
     "an idle event on a watched session must reach the injection decision",
   )
-  assert.ok(session.prompts[0].includes("继续执行"), "the configured continuation message must be injected")
+  assert.equal(
+    session.prompts[0],
+    DEFAULT_CONFIG.message,
+    "the configured continuation message must be injected verbatim",
+  )
 })
 
 test("cleanup disposes the RPC registration and closes the event subscription", async () => {

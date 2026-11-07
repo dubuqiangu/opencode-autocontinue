@@ -47,6 +47,7 @@
 | D22 | DSH 风格（风味）机制 | 整体**不移植**（风味/人设/方法论预设/角色层级/i18n/降压换框/钉味提醒库/feedback） | 逐项借鉴——多数依赖我方 `ServerContext` 没有的宿主 API；且部分与「零模型成本」冲突 | loop-evidence §9.2 |
 | D23 | V2 死路径清理 | **不做**：保留 `message.updated` / `session.error` / `info.role` 分支 | 删掉死路径——会破坏 5 处锁定用例并回退 0.3.11 已记录的兼容决策，收益仅「少几行」 | loop-evidence §7.6 |
 | D24 | 测试退出方式 | v0.5.3：测试必须自行退出，`npm test` = `node --experimental-strip-types --test "test/*.test.ts"` | 依赖 `--test-force-exit`——掩盖 `makeEngine()` 从不 `dispose()` 造成的 15 个残留定时器 | loop-mechanisms §9.5 |
+| D25 | 全局配置路径的可注入性 | v0.5.4 起 `loadConfig` 支持可选的全局配置路径注入（`LoadConfigOptions`），测试不再改写进程级环境变量 | 靠改 `USERPROFILE` / `HOME` 隔离——进程级全局状态，同进程并行跑测试会互相污染 | loop-mechanisms §10 |
 
 ---
 
@@ -162,6 +163,9 @@ Loop 压力 6 档、Oracle 拒绝 3 档），结论是**整体不移植**，只�
   不得靠 `--test-force-exit` 掩盖 `makeEngine()` 从不 `dispose()` 造成的 15 个残留定时器。
 
 完整的规格、验收口径与实施清单见 [loop-mechanisms.md §9](loop-mechanisms.md#9-v053-修复规格)。
+
+v0.5.4 的三项技术债清理（全局配置路径可注入、测试夹具去重、断言与配置常量比对）
+**不改变任何运行时语义**，规格见 [loop-mechanisms.md §10](loop-mechanisms.md#10-v054-增量)。
 
 ---
 

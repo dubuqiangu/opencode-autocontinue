@@ -102,7 +102,7 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue   # 卸载
 - **server 侧源码由 OpenCode 运行时直接解析**，不需要构建；改动 `src/` 下的 server 模块直接生效。
 - **TUI 侧必须构建**：`exports["./tui"]` 指向预构建的 `dist/tui.js`，改了 `src/tui.tsx` 不跑 `npm run build:tui` 就什么都不会生效。
 - 语法快检：`node --experimental-strip-types --check src/<file>.ts`
-- 单测：`npm test`（等价于 `node --experimental-strip-types --test "test/*.test.ts"`，覆盖全部 12 个测试文件、251 个用例，跑完自行退出，不需要 `--test-force-exit`）
+- 单测：`npm test`（等价于 `node --experimental-strip-types --test "test/*.test.ts"`，覆盖全部 12 个测试文件、252 个用例，跑完自行退出，不需要 `--test-force-exit`）
 - TUI 打包：`npm run build:tui`（esbuild，`src/tui.tsx` → `dist/tui.js`）
 
 ## 许可

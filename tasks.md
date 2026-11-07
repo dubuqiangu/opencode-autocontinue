@@ -5,16 +5,13 @@
 
 ## 当前状态
 
-- **已发布版本**：0.5.3（本轮发布；改动 `src/` 运行时行为，按发布规则 bump）
-- **上一版本**：0.5.2（commit `1ad769b`）
-- **本轮修复内容概述**：
-  - `maxConsecutive` 负值不再静默取消注入上限——负值回退默认 20，`0` 仍表示不限
-  - 墙钟预算改为**按轮次计量**——真实用户消息开启新一轮时，`watchTimeoutMs` 预算重新计算，不再从首次值守起无限累加
-  - 停止原因新增第 8 种短语 `title excluded`（会话标题命中 `excludeTitleKeywords` 而停止），并可在 footer 与 `status` toast 中观测
-  - 停止原因取值收敛为**单一真源**（`src/rpc.ts` 持有 8 值定义），并加测试守卫确保 RPC 契约 / 状态存储 / 界面文案三者一致
-  - 单测定时器泄漏修复：`npm test` 跑完自行退出，不再需要 `--test-force-exit`
-  - `package.json` 新增 `test` script，`npm test` 可直接使用
-  - 文档层校正与结构化：入口页、安装/更新/卸载命令占位符、断链修复、changelog 按版本分节、设计稿拆分三份
+- **已发布版本**：0.5.4（本轮发布；`src/config.ts` 有运行时 API 变更，按发布规则 bump）
+- **上一版本**：0.5.3（commit `ece2e56`）
+- **本轮修复内容概述**（本轮无用户可见行为变更）：
+  - 全局配置路径可注入：`loadConfig` 新增可选第二参数 `LoadConfigOptions`，可指定读取哪个全局配置文件；不传时行为与 v0.5.3 完全一致
+  - 测试不再改写 `USERPROFILE` / `HOME` 这类进程级环境变量来隔离真实用户配置——进程级全局状态在同进程并行跑测试时会互相污染
+  - 测试夹具去重：`test/server.test.ts` 自带的 `FakeStorage` / `makeFakeSession` / 引擎注册表删除，统一改用共享夹具 `test/support/harness.ts`，仓库内不再有第二份实现
+  - 测试解除文案硬编码：断言改为与配置常量比对，断言的是**行为**（注入的就是配置的那条消息）而不是文案本身
 
 ## 阶段 A：骨架与 RPC ✅
 
@@ -107,3 +104,4 @@
 - 2026-10-03：`node --test test/server.test.ts` → 25/25 pass
 - 已实现：DESIGN.md 目录树 + 交互顺序图；README.md；tsconfig.json
 - 2026-11-07（v0.5.3 本轮）：入口层文档全面校正（footer / 侧栏 / toast 实际形态、5 类停止护栏、8 个停止原因、`userGraceMs` 默认 15 秒、默认续跑消息文案、正确开发命令）；墙钟预算改为按轮次计量；停止原因新增 `title excluded`；单测定时器泄漏修复并新增 `test` script。验证由编排者统一执行（`npm test` / `npm run build:tui` / `node --experimental-strip-types --check src/<file>.ts`）。
+- 2026-11-08（v0.5.4 本轮）：全局配置路径可注入（`loadConfig` 新增可选 `LoadConfigOptions`，不传时行为不变）、测试夹具统一到 `test/support/harness.ts`、测试断言改为与配置常量比对（不再硬编码文案）。本轮无用户可见行为变更；验证由编排者统一执行。

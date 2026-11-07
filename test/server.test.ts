@@ -139,7 +139,6 @@ test("injectContinuation calls session.prompt with rendered text", async () => {
 
 // --- engine decision matrix ---
 import {
-  AutocontinueEngine,
   computeEndAt,
   startTimeNotReached,
   startGateClosed,
@@ -157,62 +156,17 @@ import {
 } from "../src/verify.ts"
 import type { SpawnAdapter } from "../src/verify.ts"
 
-// --- engine lifecycle registry ---
-// Every AutocontinueEngine owns timers: scheduleInjection() arms a setTimeout
-// and scheduleInterval() arms a setInterval. Without an explicit dispose()
-// those handles stay referenced by the event loop and `node --test` never
-// returns (the suite used to hang forever after "tests passed").
-// createEngine() registers every instance and the afterEach hook disposes
-// them after each test, so the process terminates on its own.
+// --- shared test fixtures ---
+// The engine lifecycle registry, the fake storage and the fake session live in
+// test/support/harness.ts and are shared by every test module - including this
+// one. There is exactly ONE FakeStorage and ONE makeFakeSession
+// implementation in the repo, so do not reintroduce a local copy here.
 
-const liveEngines = new Set<AutocontinueEngine>()
-
-function createEngine(
-  session: unknown,
-  config: () => typeof DEFAULT_CONFIG,
-  store: WatchStore,
-  emitChanged: (event: any) => void,
-  verifyRunner?: (spec: any) => Promise<any>,
-  baseDirectory?: string,
-): AutocontinueEngine {
-  const engine = new AutocontinueEngine(
-    session as any,
-    config,
-    store,
-    emitChanged,
-    verifyRunner,
-    baseDirectory,
-  )
-  liveEngines.add(engine)
-  return engine
-}
+import { createEngine, disposeEngines, FakeStorage, makeFakeSession } from "./support/harness.ts"
 
 afterEach(() => {
-  for (const engine of liveEngines) engine.dispose()
-  liveEngines.clear()
+  disposeEngines()
 })
-
-class FakeStorage {
-  private data = new Map<string, unknown>()
-  async get(key: string) { return this.data.get(key) }
-  async set(key: string, value: unknown) { this.data.set(key, value) }
-}
-
-function makeFakeSession() {
-  return {
-    prompts: [] as string[],
-    hooks: [] as Array<{ name: string; fn: (e: any) => void | Promise<void> }>,
-    async prompt(input: { sessionID: string; text: string }) {
-      this.prompts.push(input.text)
-    },
-    async hook(name: string, fn: (e: any) => void | Promise<void>) {
-      this.hooks.push({ name, fn })
-    },
-    async context() {
-      return [] // no messages
-    },
-  }
-}
 
 async function makeEngine(overrides: Partial<typeof DEFAULT_CONFIG> = {}) {
   const session = makeFakeSession()
@@ -690,7 +644,7 @@ test("retry hook rewrite uses retryHookHandler via engine", async () => {
     attempt: 1,
     decision: { retry: false },
   }
-  await session.hooks?.[0]?.fn?.(event)
+  await session.hooks?.[0]?.callback?.(event)
   assert.equal(event.decision.retry, true)
 })
 // --- regression tests for server fixes ---

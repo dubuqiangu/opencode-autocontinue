@@ -15,6 +15,11 @@
 //
 // This module is NOT a *.test.ts file: `node --test "test/*.test.ts"` only
 // picks up the test modules, never this helper.
+//
+// test/server.test.ts uses these fixtures as well: the engine lifecycle
+// registry, the fake storage and the fake session are shared by every test
+// module, so the repo holds exactly ONE FakeStorage and ONE makeFakeSession
+// implementation - never add a second copy.
 
 import { AutocontinueEngine } from "../../src/engine.ts"
 import type { PluginConfig } from "../../src/config.ts"

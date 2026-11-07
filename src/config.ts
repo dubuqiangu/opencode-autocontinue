@@ -328,14 +328,24 @@ function readConfigFile(filePath: string): unknown | null {
   }
 }
 
+/** Options for loadConfig(): let tests and tooling inject an isolated global
+ *  config path instead of relying on the process environment. */
+export interface LoadConfigOptions {
+  /** Global config file to read instead of the default location under the user home.
+   *  Omit to use globalConfigPath(). Test/tooling use this to avoid touching
+   *  the real user configuration (or the process environment). */
+  globalConfigPath?: string
+}
+
 /** Global config path under the user home. */
 export function globalConfigPath(): string {
   return join(homedir(), ".config", "opencode", "opencode-autocontinue.jsonc")
 }
 
 /** Load global config merged over defaults; optional project dir overrides it. */
-export function loadConfig(projectDirectory?: string): PluginConfig {
-  const merged = mergeConfig(DEFAULT_CONFIG, readConfigFile(globalConfigPath()))
+export function loadConfig(projectDirectory?: string, options: LoadConfigOptions = {}): PluginConfig {
+  const globalConfigFile = options.globalConfigPath ?? globalConfigPath()
+  const merged = mergeConfig(DEFAULT_CONFIG, readConfigFile(globalConfigFile))
   if (projectDirectory) {
     const projectOverride = readConfigFile(join(projectDirectory, ".opencode", "opencode-autocontinue.jsonc"))
     if (projectOverride) return mergeConfig(merged, projectOverride)

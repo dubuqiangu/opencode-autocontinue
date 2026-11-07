@@ -2,33 +2,29 @@
 // project file) and the maxConsecutive guardrails.
 //
 // loadConfig() reads the GLOBAL config from the user's home directory
-// (~/.config/opencode/opencode-autocontinue.jsonc). A test that calls it
-// without isolating the home would read — and be shaped by — the developer's
-// real configuration. Every test below points the home directory at a
-// throwaway temp directory (os.homedir() honours USERPROFILE on Windows and
-// HOME on POSIX) and restores the original environment afterwards.
+// (~/.config/opencode/opencode-autocontinue.jsonc). To keep these tests
+// isolated from the developer's real configuration, every case injects an
+// explicit global config path through LoadConfigOptions.globalConfigPath:
+// either a file inside a throwaway temp directory, or a path that does not
+// exist. The tests therefore never modify the USERPROFILE / HOME process
+// environment variables, so several test files can run side by side in the
+// same process without polluting each other.
 //
 // Run: node --experimental-strip-types --test test/config-load.test.ts
 
 import { afterEach, test } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { DEFAULT_CONFIG, loadConfig, mergeConfig } from "../src/config.ts"
+import { DEFAULT_CONFIG, globalConfigPath, loadConfig, mergeConfig, parseJsonc } from "../src/config.ts"
 import { WatchStore } from "../src/state.ts"
 import { createEngine, disposeEngines, FakeStorage, makeFakeSession } from "./support/harness.ts"
 
-const originalUserProfile = process.env.USERPROFILE
-const originalHome = process.env.HOME
 const temporaryDirectories: string[] = []
 
 afterEach(() => {
-  if (originalUserProfile === undefined) delete process.env.USERPROFILE
-  else process.env.USERPROFILE = originalUserProfile
-  if (originalHome === undefined) delete process.env.HOME
-  else process.env.HOME = originalHome
   disposeEngines()
   while (temporaryDirectories.length > 0) {
     const directory = temporaryDirectories.pop()
@@ -36,25 +32,31 @@ afterEach(() => {
   }
 })
 
-interface IsolatedEnvironment {
-  homeDirectory: string
+interface TestEnvironment {
+  globalConfigDirectory: string
   projectDirectory: string
 }
 
-/** Point the home directory at a temp dir and return fresh project dir. */
-function isolateHome(): IsolatedEnvironment {
-  const homeDirectory = mkdtempSync(join(tmpdir(), "opencode-autocontinue-home-"))
+/** Create throwaway directories for the global config and the project config. */
+function createTestEnvironment(): TestEnvironment {
+  const globalConfigDirectory = mkdtempSync(join(tmpdir(), "opencode-autocontinue-global-"))
   const projectDirectory = mkdtempSync(join(tmpdir(), "opencode-autocontinue-project-"))
-  temporaryDirectories.push(homeDirectory, projectDirectory)
-  process.env.USERPROFILE = homeDirectory
-  process.env.HOME = homeDirectory
-  return { homeDirectory, projectDirectory }
+  temporaryDirectories.push(globalConfigDirectory, projectDirectory)
+  return { globalConfigDirectory, projectDirectory }
 }
 
-function writeGlobalConfig(homeDirectory: string, contents: string): void {
-  const configDirectory = join(homeDirectory, ".config", "opencode")
+/** Write a global config file under `directory` and return its absolute path. */
+function writeGlobalConfig(directory: string, contents: string): string {
+  const configDirectory = join(directory, ".config", "opencode")
   mkdirSync(configDirectory, { recursive: true })
-  writeFileSync(join(configDirectory, "opencode-autocontinue.jsonc"), contents, "utf-8")
+  const configFile = join(configDirectory, "opencode-autocontinue.jsonc")
+  writeFileSync(configFile, contents, "utf-8")
+  return configFile
+}
+
+/** A global config path that points at a file which does not exist. */
+function missingGlobalConfigPath(directory: string): string {
+  return join(directory, ".config", "opencode", "missing-opencode-autocontinue.jsonc")
 }
 
 function writeProjectConfig(projectDirectory: string, contents: string): void {
@@ -63,31 +65,44 @@ function writeProjectConfig(projectDirectory: string, contents: string): void {
   writeFileSync(join(configDirectory, "opencode-autocontinue.jsonc"), contents, "utf-8")
 }
 
+/** Mirror how src/config.ts reads the default global config file. */
+function readDefaultGlobalConfig(): unknown | null {
+  try {
+    return parseJsonc(readFileSync(globalConfigPath(), "utf-8"))
+  } catch {
+    return null
+  }
+}
+
 test("loadConfig returns the shipped defaults when no config file exists", () => {
-  const { projectDirectory } = isolateHome()
-  const config = loadConfig(projectDirectory)
+  const { globalConfigDirectory, projectDirectory } = createTestEnvironment()
+  const globalConfigFile = missingGlobalConfigPath(globalConfigDirectory)
+  const config = loadConfig(projectDirectory, { globalConfigPath: globalConfigFile })
   assert.equal(config.maxConsecutive, DEFAULT_CONFIG.maxConsecutive)
   assert.equal(config.watchTimeoutMs, DEFAULT_CONFIG.watchTimeoutMs)
   assert.equal(config.message, DEFAULT_CONFIG.message)
   assert.equal(config.endTime, DEFAULT_CONFIG.endTime)
 })
 
-test("loadConfig reads the global config file from the isolated home directory", () => {
-  const { homeDirectory, projectDirectory } = isolateHome()
-  writeGlobalConfig(homeDirectory, '{ "message": "全局消息", "maxConsecutive": 7 }')
-  const config = loadConfig(projectDirectory)
+test("loadConfig reads the global config file from the injected global config path", () => {
+  const { globalConfigDirectory, projectDirectory } = createTestEnvironment()
+  const globalConfigFile = writeGlobalConfig(
+    globalConfigDirectory,
+    '{ "message": "全局消息", "maxConsecutive": 7 }',
+  )
+  const config = loadConfig(projectDirectory, { globalConfigPath: globalConfigFile })
   assert.equal(config.message, "全局消息")
   assert.equal(config.maxConsecutive, 7)
 })
 
 test("loadConfig merges the project config over the global config", () => {
-  const { homeDirectory, projectDirectory } = isolateHome()
-  writeGlobalConfig(
-    homeDirectory,
+  const { globalConfigDirectory, projectDirectory } = createTestEnvironment()
+  const globalConfigFile = writeGlobalConfig(
+    globalConfigDirectory,
     '{ "message": "全局消息", "maxConsecutive": 7, "idleDelayMs": 1111, "endTime": "23:30" }',
   )
   writeProjectConfig(projectDirectory, '{ "message": "项目消息", "idleDelayMs": 2222 }')
-  const config = loadConfig(projectDirectory)
+  const config = loadConfig(projectDirectory, { globalConfigPath: globalConfigFile })
   // Same key: the project level wins.
   assert.equal(config.message, "项目消息")
   assert.equal(config.idleDelayMs, 2222)
@@ -97,28 +112,47 @@ test("loadConfig merges the project config over the global config", () => {
 })
 
 test("loadConfig replaces list values instead of concatenating them", () => {
-  const { homeDirectory, projectDirectory } = isolateHome()
-  writeGlobalConfig(homeDirectory, '{ "completionMarkers": ["[global-done]"] }')
+  const { globalConfigDirectory, projectDirectory } = createTestEnvironment()
+  const globalConfigFile = writeGlobalConfig(
+    globalConfigDirectory,
+    '{ "completionMarkers": ["[global-done]"] }',
+  )
   writeProjectConfig(projectDirectory, '{ "completionMarkers": ["[project-done]"] }')
-  const config = loadConfig(projectDirectory)
+  const config = loadConfig(projectDirectory, { globalConfigPath: globalConfigFile })
   assert.deepEqual(config.completionMarkers, ["[project-done]"])
 })
 
-test("loadConfig ignores the real user configuration directory", () => {
-  // The isolated home has no config file at all, so every value must be the
-  // shipped default — in particular the real user's endTime must not leak in.
-  const { projectDirectory } = isolateHome()
-  const config = loadConfig(projectDirectory)
+test("loadConfig ignores configuration outside the injected global config path", () => {
+  // The injected path does not exist, so every value must be the shipped
+  // default — in particular nothing from the real user's home directory
+  // may leak in.
+  const { globalConfigDirectory, projectDirectory } = createTestEnvironment()
+  const globalConfigFile = missingGlobalConfigPath(globalConfigDirectory)
+  assert.equal(existsSync(globalConfigFile), false)
+  const config = loadConfig(projectDirectory, { globalConfigPath: globalConfigFile })
   assert.equal(config.endTime, DEFAULT_CONFIG.endTime)
   assert.equal(config.startTime, DEFAULT_CONFIG.startTime)
   assert.equal(config.message, DEFAULT_CONFIG.message)
+  // Nothing outside the injected path was read: the result is exactly the
+  // shipped defaults.
+  assert.deepEqual(config, DEFAULT_CONFIG)
 })
 
 test("loadConfig tolerates a project directory without a config file", () => {
-  const { homeDirectory, projectDirectory } = isolateHome()
-  writeGlobalConfig(homeDirectory, '{ "maxConsecutive": 5 }')
-  const config = loadConfig(projectDirectory)
+  const { globalConfigDirectory, projectDirectory } = createTestEnvironment()
+  const globalConfigFile = writeGlobalConfig(globalConfigDirectory, '{ "maxConsecutive": 5 }')
+  const config = loadConfig(projectDirectory, { globalConfigPath: globalConfigFile })
   assert.equal(config.maxConsecutive, 5)
+})
+
+test("loadConfig without options still uses the default global config path", () => {
+  const expectedDefaultPath = join(homedir(), ".config", "opencode", "opencode-autocontinue.jsonc")
+  assert.equal(globalConfigPath(), expectedDefaultPath)
+
+  const { projectDirectory } = createTestEnvironment()
+  // Without an injected path the loader reads exactly the default global file.
+  const expectedConfig = mergeConfig(DEFAULT_CONFIG, readDefaultGlobalConfig())
+  assert.deepEqual(loadConfig(projectDirectory), expectedConfig)
 })
 
 // --- maxConsecutive guardrails ---

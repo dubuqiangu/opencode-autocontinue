@@ -35,4 +35,4 @@ OpenCode V2 插件：自动续跑因非用户原因中断、但整体任务尚�
 
 - 装机：`opencode plugin add github:dubuqiangu/opencode-autocontinue` → [安装指南](guides/install.md)
 - 上手：会话内 `/autocontinue on`，footer 出现 `[AC ●]` → [命令](features/commands.md)
-- 当前状态：v0.5.3 已发布（本轮修复：行为变更与文档校正）；真实待办只剩实机验证——D1b 跨午夜窗口与侧栏、D2 续跑实测（含验证 TOCTOU 复检）、D3 卸载重装干净（含 stopReason 短语显示） → [任务清单](../tasks.md)、[变更记录](decisions/changelog.md)
+- 当前状态：v0.5.4 已发布（本轮为内部 API 扩展与测试可维护性改进，无用户可见行为变更）；真实待办只剩实机验证——D1b 跨午夜窗口与侧栏、D2 续跑实测（含验证 TOCTOU 复检）、D3 卸载重装干净（含 stopReason 短语显示） → [任务清单](../tasks.md)、[变更记录](decisions/changelog.md)

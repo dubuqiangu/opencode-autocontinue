@@ -4,13 +4,13 @@
 推送前脱敏扫描、命名见名知意、代码组织等，此处不重复）。
 
 仓库概况：OpenCode V2 插件，自动续跑被中断的会话（模型报错、阶段性空转、网络抖动）。
-`src/` 共 10 个 TS 模块 + 1 个 TUI 组件；测试共 12 个测试文件、251 个用例
-（server 153 / config-safety 16 / tui-delivery 15 / verify-safety 6 / session-resolution 4 /
-index 12 / rpc-contract 7 / config-load 11 / round-budget 10 / keep-alive 6 / guardrail-off 6 /
-title-exclusion 5）。另有 `test/support/harness.ts` 与两个手工脚本 `config-verify.ts` /
+`src/` 共 10 个 TS 模块 + 1 个 TUI 组件；测试共 12 个测试文件、252 个用例
+（server 153 / config-safety 16 / tui-delivery 15 / index 12 / config-load 12 /
+rpc-contract 7 / round-budget 10 / keep-alive 6 / guardrail-off 6 /
+title-exclusion 5 / verify-safety 6 / session-resolution 4）。另有 `test/support/harness.ts` 与两个手工脚本 `config-verify.ts` /
 `install-verify.ts`，不被 `test/*.test.ts` 匹配，不计入上述数量。
 
-- 单测：`npm test` —— 跑全部 12 个测试文件（251 个用例），跑完自行退出（不需要 `--test-force-exit`）
+- 单测：`npm test` —— 跑全部 12 个测试文件（252 个用例），跑完自行退出（不需要 `--test-force-exit`）
 - 语法快检：`node --experimental-strip-types --check src/<file>.ts`
 - TUI 打包：`npm run build:tui` —— **改动 `src/tui.tsx` 后必须执行，并把 `dist/tui.js` 一起提交**
   （`exports["./tui"]` 指向预构建的 `dist/tui.js`；server 侧源码由 OpenCode 运行时直接解析，
