@@ -126,7 +126,19 @@ var STOP_REASON_LABELS = {
 };
 function stopReasonLabel(reason) {
   if (reason === void 0) return void 0;
+  if (!Object.hasOwn(STOP_REASON_LABELS, reason)) return void 0;
   return STOP_REASON_LABELS[reason];
+}
+var WATCH_STATE_LABELS = {
+  watching: "on watch",
+  confirming: "review round",
+  paused: "on hold",
+  stopped: "stopped",
+  done: "finished"
+};
+function watchStateLabel(state) {
+  if (!Object.hasOwn(WATCH_STATE_LABELS, state)) return `unknown state (${state})`;
+  return WATCH_STATE_LABELS[state];
 }
 function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return "0s";
@@ -149,7 +161,7 @@ function mergeWatchState(current, change) {
   if (state === "stopped" && typeof change.stopReason !== "string") return void 0;
   const merged = {
     // Keep the fields the event does not carry (`since`, `lastInjectedAt`):
-    // dropping `since` would freeze the sidebar ⏱ to "⏱ …".
+    // dropping `since` would freeze the sidebar ⏱ to its "starting" state.
     ...current ?? {},
     sessionID: change.sessionID,
     state,
@@ -318,14 +330,18 @@ var tui_default = Plugin.define({
         const metricLines = [];
         if (status.state === "watching" || status.state === "confirming") {
           metricLines.push(
-            typeof status.since === "number" ? `\u23F1 ${formatDuration(now() - status.since)}` : "\u23F1 \u2026"
+            // The server has not reported the watch start time yet (the round
+            // was just enabled and the real status has not arrived) — say the
+            // clock is pending instead of showing an ellipsis that reads like
+            // a truncated number next to the real counters.
+            typeof status.since === "number" ? `\u23F1 ${formatDuration(now() - status.since)}` : "\u23F1 starting"
           );
         }
         const lifetime = typeof status.totalInjections === "number" ? status.totalInjections : status.injections;
         const roundIn = status.injections;
         const roundSuffix = typeof status.totalInjections === "number" && roundIn !== lifetime ? ` (${roundIn} this round)` : "";
         metricLines.push(`\u{1F504} ${lifetime} injection${lifetime === 1 ? "" : "s"}${roundSuffix}`);
-        metricLines.push(`\u{1F3AF} ${status.state}`);
+        metricLines.push(`\u{1F3AF} ${watchStateLabel(status.state)}`);
         if (status.verifying) metricLines.push("\u{1F50D} verifying");
         if (typeof status.rejections === "number" && status.rejections > 0) {
           metricLines.push(`\u{1F6AB} ${status.rejections} rejection${status.rejections === 1 ? "" : "s"}`);
@@ -405,8 +421,8 @@ var tui_default = Plugin.define({
                       const args = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase();
                       try {
                         if (args === "on") {
-                          const state = await setEnabled(sessionID, true);
-                          showToast("Autocontinue", `Watch enabled (${state})`, "success");
+                          await setEnabled(sessionID, true);
+                          showToast("Autocontinue", "Watch enabled", "success");
                         } else if (args === "off") {
                           await setEnabled(sessionID, false);
                           showToast("Autocontinue", "Watch disabled", "success");
@@ -420,7 +436,7 @@ var tui_default = Plugin.define({
                             const stopSuffix = stopPhrase === void 0 ? "" : ` \xB7 ${stopPhrase}`;
                             showToast(
                               "Autocontinue",
-                              `Watching \xB7 ${result.state.state} \xB7 ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
+                              `${watchStateLabel(result.state.state)} \xB7 ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
                               "info"
                             );
                           } else {

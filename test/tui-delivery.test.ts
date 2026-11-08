@@ -21,6 +21,8 @@ import { STOP_REASONS } from "../src/rpc.ts"
 import {
   STOP_REASON_LABELS,
   stopReasonLabel,
+  WATCH_STATE_LABELS,
+  watchStateLabel,
   formatDuration,
   mergeWatchState,
 } from "../src/tui-logic.ts"
@@ -141,6 +143,67 @@ test("the title-excluded reason renders as the phrase 'title excluded'", () => {
 test("stopReasonLabel returns undefined for an unknown or missing reason", () => {
   assert.equal(stopReasonLabel(undefined), undefined, "a missing stop reason has no phrase")
   assert.equal(stopReasonLabel("not-a-stop-reason"), undefined, "an unknown stop reason has no phrase")
+})
+
+test("stopReasonLabel returns undefined for an inherited Object.prototype key", () => {
+  // Both label maps are plain object literals, so a bare lookup resolves
+  // "constructor" to Object and "toString" to the inherited function. The
+  // footer would then render "· function Object() { [native code] }" instead
+  // of omitting the suffix. The reason string arrives untyped from the event
+  // payload, so the lookup must be an own-property check.
+  for (const inheritedKey of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+    assert.equal(
+      stopReasonLabel(inheritedKey),
+      undefined,
+      `the inherited key "${inheritedKey}" must not resolve to a stop-reason phrase`,
+    )
+  }
+})
+
+test("watchStateLabel maps every watch state to a non-empty label", () => {
+  const watchStates: WatchStatusView["state"][] = ["watching", "confirming", "paused", "stopped", "done"]
+  for (const state of watchStates) {
+    const label = watchStateLabel(state)
+    assert.ok(typeof label === "string" && label.length > 0, `${state} must map to a non-empty label`)
+    assert.equal(label, WATCH_STATE_LABELS[state], `${state} must resolve to its mapped label`)
+  }
+  assert.equal(
+    Object.keys(WATCH_STATE_LABELS).length,
+    watchStates.length,
+    "the state label map must cover exactly the five watch states",
+  )
+})
+
+test("watchStateLabel falls back to a visibly raw value for an unknown state", () => {
+  const label = watchStateLabel("a-state-this-build-does-not-know")
+  assert.equal(label, "unknown state (a-state-this-build-does-not-know)")
+  assert.ok(label.length > 0, "the fallback must never be empty")
+})
+
+test("watchStateLabel does not resolve an inherited Object.prototype key", () => {
+  for (const inheritedKey of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+    const label = watchStateLabel(inheritedKey)
+    assert.equal(typeof label, "string", `the inherited key "${inheritedKey}" must not resolve to a function`)
+    assert.ok(
+      label.startsWith("unknown state ("),
+      `the inherited key "${inheritedKey}" must fall back to the raw-value form`,
+    )
+  }
+})
+
+test("the sidebar row and the status toast render the state through watchStateLabel", () => {
+  // The raw protocol value must never reach the user directly — both
+  // surfaces go through the label map so "confirming" reads as a review
+  // round instead of an internal enum token.
+  const source = readRepo("src/tui.tsx")
+  assert.ok(
+    source.includes("watchStateLabel(status.state)"),
+    "the sidebar state row must go through watchStateLabel",
+  )
+  assert.ok(
+    source.includes("watchStateLabel(result.state.state)"),
+    "the status toast must go through watchStateLabel",
+  )
 })
 
 test("footer indicator renders the stop reason phrase and omits it when absent", () => {

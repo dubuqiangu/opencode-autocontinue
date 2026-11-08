@@ -40,9 +40,9 @@
 
 | 状态 | 显示 | 条件 |
 |---|---|---|
-| 值守中 | `Watch` + `⏱ 3m 22s` / `🔄 N injections` / `🎯 watching\|confirming` | 值守进行中（`watching` / 复查轮 `confirming`），⏱ 为已值守时长 |
+| 值守中 | `Watch` + `⏱ 3m 22s` / `🔄 N injections` / `🎯 on watch\|review round` | 值守进行中（`watching` / 复查轮 `confirming`），⏱ 为已值守时长 |
 | 值守中（注入计数补充） | `🔄 N injections (M this round)` | 括号内 M 为**本轮**（自上次真实用户消息起）的注入数；累计数与本轮数相同时不显示括号后缀 |
-| 值守中（附加行，仅有值时） | `🔍 verifying` / `🚫 N rejection(s)` / `🛠 N tool failure(s)` | 验证命令运行中 / 本轮验证被拒次数 / 启用 `observeToolFailures` 时的工具失败观测计数 |
+| 值守中（附加行，仅有值时） | `🔍 verifying` / `🚫 N rejections` / `🛠 N tool failures` | 验证命令运行中 / 本轮验证被拒次数 / 启用 `observeToolFailures` 时的工具失败观测计数 |
 | 终态 / 未值守 | 不渲染（返回 null，不占位） | `done` / `stopped` / `paused`，或未 `/autocontinue on` |
 
 - **两处注入计数口径不同，别直接比对**：侧栏 `🔄` 的主数字是**生命周期累计**（`totalInjections`，自该会话首次值守起累计），括号里的 `M this round` 才是本轮数；而 `/autocontinue status` 的 toast 只显示**本轮**注入数（`injections`）。所以一个会话值守过几轮后，侧栏主数字会大于 status toast 里的数字——这是口径差异，不是显示错误。
@@ -50,6 +50,7 @@
 - 全英文标签（图标 + 英文单词），与 usage-meter 右侧栏风格一致
 - 注入计数用 **🔄**（U+1F504），不是 🔁
 - `⏱` 时长每 1s 刷新（状态为 `watching` / `confirming` 时跑定时器）
+- `⏱` 的**起始占位**是 `⏱ starting`（`since` 尚未成为数字时）：刻意不用省略号 `…`——省略号看起来像一个**被截断的数值**，与相邻行的数值风格不一致；`starting` 是正常英文措辞，且**行长度稳定**，真实时长到位时不会让侧栏块跳动
 - 侧栏块只承载"值守进行中"；终态/暂停反馈由 footer 指示符（`[AC ✓]` / `[AC ⏸]` / `[AC ⏹ N]` / `[AC ⏹ N · <phrase>]`）与命令 toast 承载——终态行曾在此渲染且跨重启复活，导致每个历史值守过的会话常驻 Watch 块（v0.3.6 修复）
 - **标题可折叠**（v0.3.9）：点击 `▼ Watch` 标题行立即收起为 `▸ Watch`，再点展开；折叠状态存 setup 作用域（v0.3.10），宿主重挂载侧栏不重置（重挂载重置曾让折叠像失效）
 
@@ -62,5 +63,19 @@
 
 ## 配套反馈
 
-- 开启/关闭/续跑注入/停止/出错时 toast 提示（全英文，标题固定为 `Autocontinue`）：开启 `Watch enabled (watching)`、关闭 `Watch disabled`
-- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N injections`（计数为 1 时显示 `1 injection`；stopped 轮追加 ` · <phrase>`）或 `Not watching`
+- 开启/关闭/续跑注入/停止/出错时 toast 提示（全英文，标题固定为 `Autocontinue`）：开启 `Watch enabled`、关闭 `Watch disabled`
+- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `<label> · N injections`（计数为 1 时显示 `1 injection`；stopped 轮追加 ` · <phrase>`）或 `Not watching`
+- **状态标签表**（`src/tui-logic.ts` 的 `WATCH_STATE_LABELS`）：侧栏 `🎯` 行与 status toast **共用**同一张表，同一状态在两处显示一致
+
+  | 内部状态 | 用户可见标签 |
+  |---|---|
+  | `watching` | `on watch` |
+  | `confirming` | `review round` |
+  | `paused` | `on hold` |
+  | `stopped` | `stopped` |
+  | `done` | `finished` |
+  | 其它（新版宿主新增的状态） | `unknown state (<原始值>)` |
+
+  - 内部枚举值**不直接暴露给用户**——`watching` / `confirming` 这类协议字段只出现在服务端与文档的协议语境里
+  - 未知状态回退成**可见的原始值**，不是空白：用户能看出「宿主发了个本版 TUI 不认识的状态」
+  - 查表走 **own-property 检查**（`Object.hasOwn`）：状态字符串从 RPC 边界进来时**无类型**，裸查表会命中 `Object.prototype` 的键（`constructor` / `toString`），把 `function Object() { [native code] }` 渲染到侧栏和 toast 上

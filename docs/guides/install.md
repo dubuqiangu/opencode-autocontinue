@@ -41,10 +41,10 @@ opencode service restart
 
 ### 3.2 界面侧
 
-- [ ] 重启 TUI 后，在会话内输入 `/autocontinue on`，右下角弹出 toast **`Watch enabled (watching)`**
+- [ ] 重启 TUI 后，在会话内输入 `/autocontinue on`，右下角弹出 toast **`Watch enabled`**
 - [ ] 同一会话底部状态行出现 **`[AC ●]`**
 - [ ] 右侧栏出现 `Watch` 块，`⏱` 后面的时长在走动
-- [ ] 会话内输入 `/autocontinue status`，toast 显示 **`Watching · watching · 0 injections`**（字段含义：**会话名 · 状态 · 本次会话注入次数**）
+- [ ] 会话内输入 `/autocontinue status`，toast 显示 **`on watch · 0 injections`**（字段含义：**状态标签 · 本次会话注入次数**）
 - [ ] 输入 `/autocontinue off`，toast 显示 **`Watch disabled`**，footer 的 `[AC ●]` 与右侧栏 `Watch` 块同时消失
 
 ### 3.3 30 秒最小可复现场景
@@ -147,7 +147,7 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue
 ### 7.3 footer 一直不出现 / 不动
 
 - **footer 只在值守会话渲染**。没执行过 `/autocontinue on`，或已经执行过 `/autocontinue off`，footer 与右侧栏都不会出现（不占位）。
-- footer 出现但 `[AC ●]` 不动，先看右侧栏：`⏱` 时长在走说明值守中；`🎯` 后面是状态（`watching` / `confirming`）。
+- footer 出现但 `[AC ●]` 不动，先看右侧栏：`⏱` 时长在走说明值守中；`🎯` 后面是状态标签（`on watch` 值守中 / `review round` 复查轮）。
 
 ### 7.4 想知道「为什么停了」
 

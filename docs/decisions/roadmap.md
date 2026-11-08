@@ -39,10 +39,16 @@
 | v0.5.5 | 错误匹配串统一：`name` 缺失时回退读 `type`，retry hook 路径与消息事件路径产出同一匹配串。 |
 | v0.5.5 | TUI 纯逻辑抽离到 `src/tui-logic.ts`；TUI 状态指示在查询失败时保留原指示。 |
 | v0.5.5 | 验证进程终止补 spawn 失败监听，消除未捕获异常；脱敏扫描器扩充为 12 条模式。 |
+| v0.5.6 | 单引号串改**字面量语义**（只有 `\'` / `\\` 是转义）：Windows 路径 `'C:\Users\<用户名>\name\file.txt'` 不再抛 `SyntaxError`，也不会被 JSON 转义规则静默解码成含控制字符的坏路径；双引号串保持严格 JSON 语义。 |
+| v0.5.6 | 配置钳制的**诊断对称性**：建立「被静默改写的值必产生恰好一条诊断、合法值零诊断」的不变式，覆盖负值钳 0、`intervalMs` 1s 地板、`2^31-1` 上限、`maxConsecutive` 负值回退、验证超时与轮数越界、6 个数组键剔空。 |
+| v0.5.6 | 侧栏与 status toast 不再暴露内部枚举值：新增 `WATCH_STATE_LABELS` 状态标签表（`on watch` / `review round` / `on hold` / `stopped` / `finished`），未知态回退 `unknown state (<原始值>)`；`⏱` 起始占位改为 `⏱ starting`。 |
+| v0.5.6 | 标签表 own-property 守卫：`STOP_REASON_LABELS` / `WATCH_STATE_LABELS` 改用 `Object.hasOwn`，修掉 `constructor` / `toString` 等原型链键被渲染成 `function Object() { [native code] }` 的既有缺陷。 |
+| v0.5.6 | 手工验证脚本 `test/config-verify.ts` 改用 `globalConfigPath()`，不再直读 `USERPROFILE` / `HOME`；配置文件缺失与匹配器为 `null` 时给提示而非崩栈。 |
+| v0.5.6 | 结构：`src/config.ts` 按职责拆为 `config-schema.ts` / `config-parse.ts` / `config-validate.ts` + 瘦门面，导出名保持不变。 |
 
 ## 真机待办
 
-以下三项**仍未做实机验证**（单测与静态守卫已覆盖，但缺真机确认），v0.5.5 仍未做：
+以下三项**仍未做实机验证**（单测与静态守卫已覆盖，但缺真机确认），v0.5.6 仍未做：
 
 | 项 | 说明 |
 |---|---|
@@ -77,6 +83,39 @@
   的中文文案前缀仍以字面量出现在断言里，本轮未补完。
 
 `src/` 有运行时改动，按仓库发布规则 bump 至 `0.5.5`。
+
+## 本轮 v0.5.6（2026-11-09 发布）
+
+本轮是 v0.5.5 之后的**收尾轮**，主题是「把上一轮报告里的既有低优先级项一次清掉」。
+
+1. 单引号串改**字面量语义**（只有 `\'` / `\\` 是转义），Windows 路径不再抛
+   `SyntaxError`，也不再被 JSON 转义规则静默解码成含控制字符的坏路径；
+   双引号串保持严格 JSON 语义。
+2. 配置钳制的**诊断对称性**：建立「被静默改写的值必产生恰好一条诊断、合法值零诊断」
+   的不变式，覆盖负值钳 0、`intervalMs` 1s 地板、`2^31-1` 上限、`maxConsecutive`
+   负值回退、验证超时与轮数越界、6 个数组键剔空。
+3. 侧栏与 status toast 不再暴露内部枚举值（新增 `WATCH_STATE_LABELS` 状态标签表）；
+   `⏱` 起始占位改为 `⏱ starting`。
+4. 标签表 **own-property 守卫**（`Object.hasOwn`）——修掉 v0.5.5 已发布的
+   `constructor` / `toString` 等原型链键缺陷。
+5. 手工验证脚本 `test/config-verify.ts` 改用 `globalConfigPath()`，不再直读
+   `USERPROFILE` / `HOME`；配置缺失与匹配器为 `null` 时给提示而非崩栈。
+6. 结构：`src/config.ts` 按职责拆分（`config-schema` / `config-parse` /
+   `config-validate` + 瘦门面），导出名保持不变。
+
+**本轮没有修的已知问题**（详见 [known-issues.md](known-issues.md)）：
+
+- **存储多实例丢行未修**——延续 v0.5.5 的裁定：按会话分键属**破坏性存储布局变更**，
+  需另给迁移与向后兼容方案，本轮**不修**。
+- **回声时间窗兜底的残留风险未消除**——真实用户消息在窗口内且宿主不提供可提取文本时，
+  仍会被判为回声而未被处理。
+- **v0.5.4 的「测试解除文案硬编码」只完成了一部分**——延续未补完。
+- **标量配置项的非有限值 / 类型不匹配仍是静默回退**——本轮只把**数组键**的剔空纳入
+  诊断；`NaN` / `Infinity` 与标量类型不匹配仍无诊断，需单独裁决。
+- **`watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` 无 `2^31-1` 上限钳制**——
+  本轮明确不加：会改变合法值行为，超出本轮范围。
+
+`src/` 有运行时改动，按仓库发布规则 bump 至 `0.5.6`。
 
 ## 未来方向（尚无明确排期）
 

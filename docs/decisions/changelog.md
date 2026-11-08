@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 一句话摘要 |
 |---|---|---|
+| v0.5.6 | 2026-11-09 | 单引号串改字面量语义（Windows 路径不再报错）、配置钳制诊断对称化、数组剔空告警、侧栏状态标签取代内部枚举、`⏱ starting` 占位、标签表 own-property 守卫、`config.ts` 按职责拆分 |
 | v0.5.5 | 2026-11-08 | 配置解析与诊断加固、错误匹配串统一、回声幂等与时间窗兜底、`roundId` 全局单调、在途锁与每轮缓存拆分、disposed 守卫、final-check 复检、定时器钳制、TUI 纯逻辑抽离、验证进程终止修复、脱敏扫描器扩充 |
 | v0.5.4 | 2026-11-08 | 全局配置路径可注入（`loadConfig` 新增可选参数）、测试夹具去重（统一到 `test/support/harness.ts`）、测试解除文案硬编码 |
 | v0.5.3 | 2026-11-07 | `maxConsecutive` 负值回退默认、墙钟预算按轮次计量、新增第 8 个停止原因、停止原因单一真源、测试自行退出、文档分层校正 |
@@ -39,6 +40,111 @@
 | v0.2.1 | 2026-10-05 | 新增保活心跳、修 status 报错与图标延迟刷新 |
 | v0.2.0 | 2026-10-04 | TUI 值守块修复、界面全英文化 |
 | 开发阶段 | 2026-10-03 | 骨架 / RPC / 核心 / TUI 实现、文档体系重构、深度审查修复 |
+
+---
+
+## v0.5.6
+
+日期：2026-11-09
+
+本轮是 v0.5.5 之后的**收尾轮**：把上一轮报告里列出的**既有低优先级项**一次清掉。
+用户可见的变化集中在三处——**配置写错时的反馈不再有静默盲区**、**侧栏不再暴露内部枚举值**、
+**Windows 路径在单引号串里能正常解析**。
+
+### 修复
+
+**① 单引号串改用字面量语义（`src/config.ts`）**
+
+- v0.5.5 之前，单引号串里的 Windows 路径 `'C:\path'` 会**抛 `SyntaxError`**——
+  解析器把单引号串归一化成双引号串后，JSON 见到 `\p` 判定为非法转义。
+- v0.5.6 起，**单引号串采用字面量语义**（Python 式 raw）：只有 `\'` → `'`、`\\` → `\`
+  是转义，**其它任何** `\X` 原样保留两个字符。
+- **双引号串保持严格 JSON 语义不变**：`"\n"` 仍是真换行，`"\d"` 仍抛 `SyntaxError`。
+  需要 JSON 转义语义就用双引号写。
+
+> **为什么不按 JSON 解释单引号串？** `\n` `\t` `\f` `\b` `\r` 都是**合法 JSON 转义字母**，
+> 而它们恰好是 Windows 路径里最常见的目录名首字母（`\name` / `\temp` / `\bin` / `\repo`）。
+> 若按 JSON 解释，`'C:\Users\<用户名>\name\file.txt'` 会被**静默解码**成
+> `C:\Users` + 换行 + `ame` + 换页 + `ile.txt`——路径被悄悄改错，验证命令的工作目录
+> 会指向一个不存在的位置。这比原来「响亮地报错」**更危险**。因此单引号串取字面量语义。
+
+**② 配置钳制的诊断对称性（`src/config.ts`）**
+
+- 建立不变式：**任何被静默改写的配置值，必须产生且仅产生一条 `console.error`**，
+  诊断含**键名、原始值、生效值**；**本来就合法的值不产生任何诊断**。
+- v0.5.5 之前负值钳到 0 是**静默**的，超上限钳制却**告警**——同一种「改写用户输入」
+  的动作，两种反馈口径。现在两者一致。
+- 覆盖键：`idleDelayMs` / `minIntervalMs` / `intervalMs`（负值 + 1s 地板 + `2^31-1` 上限）、
+  `watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs`（负值）、
+  `maxConsecutive`（负值回退）、`verifyTimeoutMs`（越界）、`verifyMaxIterations`（越界）。
+- **保持静默的合法值**：`intervalMs = 0`（关闭周期检查）、`userGraceMs = 0`（不等）、
+  `watchTimeoutMs = 0`、`selfEchoWindowMs = 0`、`maxConsecutive = 0`（不限次）、
+  `verifyMaxIterations = 0`，以及各上下限本身。
+
+**③ 数组键剔空也告警（`src/config.ts`）**
+
+- `completionMarkers` / `errorPatterns` / `excludePatterns` / `excludeTitleKeywords` /
+  `escalationPressureLadder` / `frustrationTriggers` 剔除空串（与非字符串项）时，
+  现在输出**一条**诊断，含键名与剔除数量；剔空后数组为空时额外提示该键已无任何可用项。
+- 合法数组**零诊断**。
+
+**④ 侧栏与 toast 不再暴露内部枚举值（`src/tui-logic.ts` / `src/tui.tsx`）**
+
+- 侧栏 `🎯 ${status.state}` 曾直接把 `watching` / `confirming` 这类**内部协议值**
+  吐给用户；`/autocontinue status` 的 toast 更荒唐——`Watching · watching · 0 injections`，
+  同一个词说了两遍。
+- 新增状态标签表 `WATCH_STATE_LABELS`（`src/tui-logic.ts`），
+  **侧栏 `🎯` 行与 status toast 共用同一张表**：
+
+  | 内部状态 | 用户可见标签 |
+  |---|---|
+  | `watching` | `on watch` |
+  | `confirming` | `review round` |
+  | `paused` | `on hold` |
+  | `stopped` | `stopped` |
+  | `done` | `finished` |
+  | 其它 | `unknown state (<原始值>)` |
+
+- 未知状态回退成**可见的原始值**，不是空白——用户能看出「宿主发了个本版 TUI 不认识的状态」。
+- `/autocontinue on` 的 toast 去掉冗余的 `(watching)` 后缀，改为 `Watch enabled`。
+
+**⑤ `⏱` 起始占位不再像被截断的数值（`src/tui.tsx`）**
+
+- `since` 尚未成为数字时侧栏显示 `⏱ …`。省略号看起来像一个**被截断的数值**，
+  与相邻行（`🔄 5 injections` / `🚫 2 rejections`）的数值风格不一致。
+- 改为 `⏱ starting`：正常英文措辞，且**行长度稳定**——真实时长到位时侧栏块不会跳动。
+
+**⑥ 标签表的原型链缺陷（`src/tui-logic.ts`，v0.5.5 已发布的既有缺陷）**
+
+- `STOP_REASON_LABELS` / `WATCH_STATE_LABELS` 都是**普通对象字面量**，
+  裸查表会命中 `Object.prototype` 的键：`stopReasonLabel("constructor")` 返回
+  `Object` 构造函数，`watchStateLabel("toString")` 返回继承的函数——
+  footer 会渲染出 `· function Object() { [native code] }`。
+- `state` / `stopReason` 在 RPC 与事件边界都是**无类型字符串**，不值得当成无害键。
+- 两处查表均改为 **own-property 检查**（`Object.hasOwn`），未知值走各自的兜底分支。
+
+**⑦ 手工验证脚本不再直读环境变量（`test/config-verify.ts`）**
+
+- 改用 `globalConfigPath()`（生产代码同一条路径，`node:os` 的 `homedir()`），
+  不再直接读 `process.env.USERPROFILE` / `process.env.HOME`。
+- 配置文件不存在时打印**含查找路径**的提示并继续跑 `loadConfig` 诊断，不再抛堆栈；
+  `buildCompletionMatcher` 返回 `null` 时输出 `n/a` 而不是在 `.test()` 上崩掉。
+
+### 结构
+
+**⑧ `src/config.ts` 按职责拆分**
+
+- v0.5.6 的诊断加固把 `src/config.ts` 推到 632 行，越过项目「单文件 ~400 行」的阈值。
+- 拆为四个文件：`config-schema.ts`（类型与默认值）/ `config-parse.ts`（JSONC 解析）/
+  `config-validate.ts`（合并与逐键校验）/ `config.ts`（瘦身为门面）。
+- `src/config.ts` **re-export 保持导出名完全不变**——外部调用方与全部测试**一行未改**。
+
+### 验证
+
+- 全量单测 **366 个用例全部通过**（v0.5.5 基线 337 条）。
+- 新增/更新用例覆盖：单引号字面量语义 9 组、双引号严格性 2 组、
+  钳制诊断对称性（每个被改写键各 1 条 + 每个合法边界 0 条）、
+  6 个数组键的剔空诊断、原型链查表守卫、状态标签映射与未知态兜底。
 
 ---
 

@@ -61,7 +61,49 @@ export const STOP_REASON_LABELS: Record<string, string> = {
  *  none (e.g. the user unwatched the session). */
 export function stopReasonLabel(reason: string | undefined): string | undefined {
   if (reason === undefined) return undefined
+  // Own-property check on purpose: `STOP_REASON_LABELS` is a plain object
+  // literal, so a bare `STOP_REASON_LABELS["constructor"]` hits
+  // `Object.prototype` and turns the footer suffix into
+  // "· function Object() { [native code] }". The reason string arrives
+  // untyped from the event payload, so it is not worth trusting to be a
+  // harmless key.
+  if (!Object.hasOwn(STOP_REASON_LABELS, reason)) return undefined
   return STOP_REASON_LABELS[reason]
+}
+
+/** Short human-readable labels for the watch states the TUI surfaces.
+ *
+ *  The protocol values are internal and never reach the user as-is: a bare
+ *  enum tells the user nothing about what the plugin is doing right now.
+ *  The labels follow the TUI's English, lowercase style (see the sidebar rows
+ *  "verifying" / "rejections" / "tool failures").
+ *
+ *  - the plain watching state → "on watch"    — 值守中，等着任务中断或完成标记
+ *  - the review state         → "review round" — 复查轮：完成标记已命中，
+ *                                     注入了复查话术，正在等用户的复查回复
+ */
+export const WATCH_STATE_LABELS: Record<string, string> = {
+  watching: "on watch",
+  confirming: "review round",
+  paused: "on hold",
+  stopped: "stopped",
+  done: "finished",
+}
+
+/** Short human-readable label for a watch state.
+ *
+ *  Unknown states (a newer server announcing a state this TUI build does not
+ *  know yet) fall back to a visibly raw value — never to an empty string, so
+ *  the sidebar row and the status toast always say something.
+ *
+ *  The lookup is an own-property check on purpose: `WATCH_STATE_LABELS` is a
+ *  plain object literal, so a bare `WATCH_STATE_LABELS["constructor"]` hits
+ *  `Object.prototype` and renders "function Object() { [native code] }"
+ *  instead of falling back. The state string arrives untyped from the RPC
+ *  boundary, so it is not worth trusting to be a harmless key. */
+export function watchStateLabel(state: string): string {
+  if (!Object.hasOwn(WATCH_STATE_LABELS, state)) return `unknown state (${state})`
+  return WATCH_STATE_LABELS[state]
 }
 
 // "3m 22s" (≥1 min) or "45s"; "10h 13m" (≥1h); "2d 3h" (≥1d).
@@ -119,7 +161,7 @@ export function mergeWatchState(
   if (state === "stopped" && typeof change.stopReason !== "string") return undefined
   const merged: WatchStatusView = {
     // Keep the fields the event does not carry (`since`, `lastInjectedAt`):
-    // dropping `since` would freeze the sidebar ⏱ to "⏱ …".
+    // dropping `since` would freeze the sidebar ⏱ to its "starting" state.
     ...(current ?? {}),
     sessionID: change.sessionID,
     state,

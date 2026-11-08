@@ -31,7 +31,7 @@ import { resolveSessionID } from "./session-resolution.ts"
 // Pure TUI helpers (stop-reason labels, duration formatting, the
 // `state.changed` merge rule) live in a JSX-free, solid-free module so the
 // test suite can import them directly instead of scraping this file's text.
-import { STOP_REASON_LABELS, formatDuration, mergeWatchState, stopReasonLabel } from "./tui-logic.ts"
+import { STOP_REASON_LABELS, formatDuration, mergeWatchState, stopReasonLabel, watchStateLabel } from "./tui-logic.ts"
 import type { WatchStatusView } from "./tui-logic.ts"
 // 0.3.5: slot mounts that create their render effects inside the plugin's own
 // module graph (see reactive-mount.ts — pitfall #13 verdict, mirrors
@@ -250,7 +250,11 @@ export default Plugin.define({
         // 值守中的时长；stopped/done 不再重复符号（⏸/✓ 与 🎯 语义重复）。
         if (status.state === "watching" || status.state === "confirming") {
           metricLines.push(
-            typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ …",
+            // The server has not reported the watch start time yet (the round
+            // was just enabled and the real status has not arrived) — say the
+            // clock is pending instead of showing an ellipsis that reads like
+            // a truncated number next to the real counters.
+            typeof status.since === "number" ? `⏱ ${formatDuration(now() - status.since)}` : "⏱ starting",
           )
         }
         // 注入次数用「累计」：每轮真实用户消息会把 injections 清零，单看它会
@@ -260,7 +264,11 @@ export default Plugin.define({
         const roundIn = status.injections
         const roundSuffix = typeof status.totalInjections === "number" && roundIn !== lifetime ? ` (${roundIn} this round)` : ""
         metricLines.push(`🔄 ${lifetime} injection${lifetime === 1 ? "" : "s"}${roundSuffix}`)
-        metricLines.push(`🎯 ${status.state}`)
+        // The raw protocol enum is never shown: it is an internal value, not a
+        // label the user can read. The label map lives in ./tui-logic.ts so the
+        // sidebar row and the status toast always name the same state the
+        // same way.
+        metricLines.push(`🎯 ${watchStateLabel(status.state)}`)
         if (status.verifying) metricLines.push("🔍 verifying")
         if (typeof status.rejections === "number" && status.rejections > 0) {
           metricLines.push(`🚫 ${status.rejections} rejection${status.rejections === 1 ? "" : "s"}`)
@@ -389,8 +397,12 @@ export default Plugin.define({
                       const args = (input ?? "").trim().split(/\s+/)[0]?.toLowerCase()
                       try {
                         if (args === "on") {
-                          const state = await setEnabled(sessionID, true)
-                          showToast("Autocontinue", `Watch enabled (${state})`, "success")
+                          // The RPC answers with the protocol enum value;
+                          // echoing it told the user nothing, so the toast
+                          // states the outcome in plain words — mirroring
+                          // "Watch disabled" on the way out.
+                          await setEnabled(sessionID, true)
+                          showToast("Autocontinue", "Watch enabled", "success")
                         } else if (args === "off") {
                           await setEnabled(sessionID, false)
                           showToast("Autocontinue", "Watch disabled", "success")
@@ -408,9 +420,14 @@ export default Plugin.define({
                                 ? stopReasonLabel(result.state.stopReason)
                                 : undefined
                             const stopSuffix = stopPhrase === undefined ? "" : ` · ${stopPhrase}`
+                            // The leading "Watching" segment is gone: it only
+                            // repeated the state word. The state label itself
+                            // now leads the line, so the toast and the sidebar
+                            // 🎯 row name the same state the same way (same
+                            // map, ./tui-logic.ts).
                             showToast(
                               "Autocontinue",
-                              `Watching · ${result.state.state} · ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
+                              `${watchStateLabel(result.state.state)} · ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
                               "info",
                             )
                           } else {

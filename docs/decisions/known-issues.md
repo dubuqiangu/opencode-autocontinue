@@ -12,7 +12,7 @@
 | 插件卸载/热重载 | cleanup 返回 dispose：拆定时器、退订、注销 slot |
 | 跨午夜值守窗口 | 自动滚动到次日（22:00→08:30 在 23:00 开启不会立即停止）；次日 `00:00`..`startTime` 之间窗口仍视为开启（`startGateClosed`，v0.5.1） |
 | 空完成标记配置 | `completionMarkers: []` 不检测完成，会话持续值守（不会瞬间判完成） |
-| 单引号 JSONC 配置 | 解析器自动归一为双引号，配置生效（不会静默丢弃） |
+| 单引号 JSONC 配置 | 解析器按**字面量语义**解析（v0.5.6 起）：只有 `\'` → `'`、`\\` → `\` 是转义，其它 `\X` 原样保留。Windows 路径如 `'C:\Users\<用户名>\name\file.txt'` 原样生效；需要 JSON 转义语义（真换行等）时用双引号写 |
 | 纯 5xx 裸状态错误 | 匹配串含 `(status: N)`，`"(status: 5"` 可命中 5xx；裸 `"5"` 已于 v0.2.2 收紧为 `"(status: 5"`，`"429"` 命中 429 |
 | 配置里的空字符串 | 6 个数组型配置键（`completionMarkers` / `errorPatterns` / `excludePatterns` / `excludeTitleKeywords` / `escalationPressureLadder` / `frustrationTriggers`）统一**剔除空串**（v0.5.5）——空串是任何字符串的子串，留着会让匹配器命中一切 |
 

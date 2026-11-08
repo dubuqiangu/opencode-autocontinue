@@ -1,6 +1,15 @@
 # 配置系统
 
-两层配置，deep merge，项目级优先。加载器（`src/config.ts`）：JSONC 解析（注释 + 尾逗号），**单引号字符串自动归一为双引号**，BOM 容错；坏文件回退默认值。
+两层配置，deep merge，项目级优先。加载器（`src/config.ts`）：JSONC 解析（注释 + 尾逗号），BOM 容错；坏文件回退默认值。
+
+**引号语义**（v0.5.6 起明确）：
+
+| 串类型 | 转义规则 | 用途 |
+|---|---|---|
+| 双引号串 | **严格 JSON 语义**：`\n` `\t` `\\` `\"` `\uXXXX` 等按 JSON 解释；非法转义（如 `\d`）**抛 `SyntaxError`** | 需要 JSON 转义语义时用双引号 |
+| 单引号串 | **字面量语义**（Python 式 raw）：只有 `\'` → `'`、`\\` → `\` 是转义；**其它任何** `\X` 原样保留两个字符 | Windows 路径等字面量场景 |
+
+单引号串采用字面量语义，是因为常见的 Windows 路径里含有 `\n` `\t` `\f` `\b` 这些**合法 JSON 转义字母**：若按 JSON 解释，`'C:\Users\<用户名>\name\file.txt'` 会被静默解码成 `C:\Users` + 换行 + `ame` + 换页 + `ile.txt`——路径被悄悄改错，比直接报错更危险。
 
 ## 配置文件位置
 
@@ -78,16 +87,27 @@
 | `markerRegex` | 源长度 > 1024 | **忽略该值**并告警（回落到 `completionMarkers`） |
 | `markerRegex` | 含**嵌套量词**（ReDoS 风险） | **忽略该值**并告警 |
 | `markerRegex` | 正则**不可编译** | **忽略该值**并告警 |
-| `completionMarkers` / `errorPatterns` / `excludePatterns` / `excludeTitleKeywords` / `escalationPressureLadder` / `frustrationTriggers` | 数组中含**空字符串** | **剔除空串**（空串是任何字符串的子串，留着会让匹配器命中一切） |
-| `idleDelayMs` / `minIntervalMs` / `userGraceMs` | 负值 | **钳到 0** |
+| `completionMarkers` / `errorPatterns` / `excludePatterns` / `excludeTitleKeywords` / `escalationPressureLadder` / `frustrationTriggers` | 数组中含**空字符串** | **剔除空串**（空串是任何字符串的子串，留着会让匹配器命中一切）**并告警**（含键名与剔除数量；剔空后数组为空时额外提示该键已无任何可用项） |
+| `idleDelayMs` / `minIntervalMs` | 负值 | **钳到 0** 并告警 |
+| `intervalMs` | 负值 | **钳到 0** 并告警 |
+| `intervalMs` | 正值低于 `1000` | **地板到 `1000`** 并告警 |
+| `watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` | 负值 | **钳到 0** 并告警 |
 | `intervalMs` / `idleDelayMs` / `minIntervalMs` | 大于 `2^31-1` | **钳到 `2^31-1`** 并告警（超出定时器可表示范围） |
-| `maxConsecutive` | 负值 | **回退默认 20**（v0.5.3 起，见下） |
+| `maxConsecutive` | 负值 | **回退到基础值**（基础值不可用时回退默认 `20`）并告警（v0.5.3 起，见下） |
+| `verifyTimeoutMs` | 低于 `1000` / 高于 `3600000` | **钳到边界** 并告警 |
+| `verifyMaxIterations` | 负值 / 高于 `10000` | **钳到边界** 并告警 |
+
+**不变式（v0.5.6 起）**：任何**被静默改写**的配置值，都必须产生**恰好一条** `console.error`，诊断信息含**键名、原始值、生效值**。**本来就合法的值不产生任何诊断**——下列值全部静默：
+
+- `intervalMs = 0`（文档化语义：关闭周期检查）、`userGraceMs = 0`（不等）、`watchTimeoutMs = 0`（无墙钟上限）、`selfEchoWindowMs = 0`、`maxConsecutive = 0`（不限次）、`verifyMaxIterations = 0`（不限轮）
+- `intervalMs = 1000`（1s 地板本身）、`verifyTimeoutMs = 1000` / `3600000`、`verifyMaxIterations = 10000`、各 `2^31-1` 上限本身
+- 任何数组键**不含空串**时
 
 > JSONC 解析器的**尾逗号前瞻会跳过注释**：`1, // 说明\n}` 这类写法不再被当成语法错误。
-> 既有钳制不变：`verifyTimeoutMs` 钳 `1000`..`3600000`，`verifyMaxIterations` 钳 `0`..`10000`，
-> `watchTimeoutMs` 负值钳 `0`。
 >
 > `intervalMs` 的 `0 = 关闭周期检查` 语义保持可达——1s 下限只对**正值**套用。
+>
+> 全局配置与项目覆盖是**两层独立合并**：同一个键在两层都被改写时会各产生一条诊断（每层一次改写 = 一条诊断），因此**同一个键最多看到两条**。
 
 ## 配置生效顺序（注入判定链）
 

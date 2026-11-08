@@ -25,6 +25,7 @@ API 的核实结论，以及当时已知但未解决的限制。
 - [v0.5.3 本轮](#v053-本轮)
 - [v0.5.4 本轮](#v054-本轮)
 - [v0.5.5 本轮](#v055-本轮)
+- [v0.5.6 本轮](#v056-本轮)
 - [附录 取证方法与边界](#附录-取证方法与边界)
 
 ---
@@ -759,7 +760,9 @@ export type StopReason =
   此前「配置写错了却毫无提示」。
 - **配置值校验**：6 个数组键剔除空串；`markerRegex` 做长度上限（1024）、嵌套量词
   （ReDoS）与可编译三重检查；`startTime` / `endTime` 校验 `HH:MM`；数值键负值钳到 0、
-  超过 `2^31-1` 钳到上限并告警。全部告警走 `console.error`，**不静默丢弃**。
+  超过 `2^31-1` 钳到上限并告警。告警走 `console.error`。
+  **（后续更正：v0.5.5 的「不静默丢弃」只对超上限钳制成立——负值钳到 0 当时是**静默**的，
+  6 个数组键剔空也是静默的。这三处静默改写在 v0.5.6 补上了诊断，见下文 v0.5.6 节。）**
 - **错误匹配串统一**：`src/events.ts` 的 `errorToMatchString` 在 `name` 缺失时回退读
   `type`——retry hook 路径与消息事件路径从此产出**同一个**匹配串。
 - **回声幂等**：注入记录在整个 `selfEchoWindowMs` 窗口内保持有效。宿主把同一条注入
@@ -790,6 +793,78 @@ export type StopReason =
   `stopReason` 在 footer 与 toast 中的实际渲染。
 - **v0.5.4 的「测试解除文案硬编码」只完成了一部分**：默认续跑消息与 `finalCheckMessage`
   的中文文案前缀仍以字面量出现在断言里，本版未补完。
+
+---
+
+## v0.5.6 本轮
+
+> 本节记录 v0.5.6 的取证与落地记录；完整的增量清单见
+> [docs/decisions/changelog.md 的 v0.5.6 节](../decisions/changelog.md#v056)。
+
+本轮是 v0.5.5 之后的**收尾轮**：把上一轮报告里列出的**既有低优先级项**一次清掉。
+
+### 取证与裁定
+
+- **GitHub 前置搜索**：评估过 `microsoft/node-jsonc-parser`（769★ MIT）与
+  `sindresorhus/strip-json-comments`，**均不采用为依赖**——前者是完整的 JSONC 语言服务，
+  体量与依赖面远超本项目所需；后者只做注释剥离，不处理单引号语义。
+  两者共同的长处是**扫描器级状态跟踪**（解析时逐字符维护上下文，而非正则替换），
+  本轮按同构思路做最小改动，不引入新依赖。
+- **单引号串转义语义是本轮的关键裁决**。中途有一版实现把单引号串里的合法 JSON 转义
+  按 JSON 规则解释，实测发现这会**静默篡改** Windows 路径：
+
+  ```
+  'C:\Users\<用户名>\name\file.txt'  →  码点 67,58,92,85,115,101,114,115,10,97,109,101,12,...
+                                  C:\Users + LF(10) + ame + FF(12) + ile.txt
+  ```
+
+  `\n` / `\f` / `\t` / `\b` / `\r` 都是**合法 JSON 转义字母**，而它们恰好是 Windows 路径里
+  最常见的目录名首字母。原缺陷是**响亮地抛 `SyntaxError`**，改坏之后变成**静默地把路径
+  指向一个不存在的目录**——后者更危险。**裁决：单引号串 = 字面量语义**（Python 式 raw），
+  只有 `\'` → `'`、`\\` → `\` 是转义；双引号串保持严格 JSON 语义不变。
+- **标签表查表方式**：两张标签表都是普通对象字面量，裸查表会命中 `Object.prototype`
+  的键。实测 `stopReasonLabel("constructor")` 返回 `Object` 构造函数——
+  footer 会渲染出 `· function Object() { [native code] }`。`state` / `stopReason` 在
+  RPC 与事件边界都是**无类型字符串**，因此查表必须用 own-property 检查
+  （`Object.hasOwn`）。这是 v0.5.5 已发布的**既有缺陷**，本轮一并修掉。
+- **文案口径统一**：`halted` 会与 footer 的 `[AC ⏹]`、停止短语 `stopped by user`
+  造成词汇分裂，故状态标签表的 `stopped` 态取 **`stopped`** 而非 `halted`。
+
+### 落地
+
+- **单引号串字面量语义**（`src/config.ts`）：见上方裁定。
+- **配置钳制的诊断对称性**：建立不变式「被静默改写的值必产生恰好一条诊断、合法值零诊断」，
+  覆盖负值钳 0、`intervalMs` 1s 地板、`2^31-1` 上限、`maxConsecutive` 负值回退、
+  `watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` 负值钳 0、
+  `verifyTimeoutMs` 与 `verifyMaxIterations` 越界。
+- **6 个数组键剔空也告警**（含剔空后数组为空的额外提示）。
+- **状态标签表**（`src/tui-logic.ts`）：侧栏 `🎯` 行与 status toast 共用；
+  未知态回退 `unknown state (<原始值>)`。
+- **`⏱ starting` 占位**取代 `⏱ …`。
+- **标签表 own-property 守卫**（两张表）。
+- **手工验证脚本**（`test/config-verify.ts`）改用 `globalConfigPath()`，不再直读
+  `USERPROFILE` / `HOME`。
+- **结构拆分**：`src/config.ts` 按职责拆为 `config-schema.ts` / `config-parse.ts` /
+  `config-validate.ts` + 瘦门面，导出名保持不变（外部调用方与全部测试一行未改）。
+- **测试拆分**：`test/config-safety.test.ts`（原 602 行）拆出 `test/config-parse.test.ts`，
+  两个文件都低于 400 行，用例总数不丢不重。
+
+### 验证
+
+- 全量单测 **366 个用例全部通过**（v0.5.5 基线 337 条）。
+- 独立探针实测（不采信实现方转述）：单引号路径码点无 9/10/12/13 控制字符；
+  双引号 `"\n"` 仍是真换行、`"\d"` 仍抛 `SyntaxError`；
+  被改写值各恰好 1 条诊断、合法值 0 条。
+
+### 本版**没有**做的事
+
+- **存储多实例丢行未修**——延续 v0.5.5 的裁定（破坏性存储布局变更）。
+- **回声时间窗兜底的残留风险未消除**。
+- **三项实机验证仍未做**：跨午夜时间窗口语义、验证流程的 TOCTOU 竞态、
+  `stopReason` 在 footer 与 toast 中的实际渲染。
+- **标量配置项的非有限值 / 类型不匹配仍是静默回退**——本轮只把数组键剔空纳入诊断。
+- **`watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` 无 `2^31-1` 上限钳制**——
+  本轮明确不加（会改变合法值行为）。
 
 ---
 

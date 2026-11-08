@@ -390,10 +390,11 @@ verify 模式下 §7.1 的两阶段流程**整段被替换**：完成信号只�
 
 ### 9.1 配置钳制：`maxConsecutive` 负值回退
 
-> **状态：✅ 已发布（v0.5.3）。**
+> **状态：✅ 已发布（v0.5.3；v0.5.6 补告警）。**
 > **当前行为**：`mergeConfig` 的 `maxConsecutive` 分支对**负值回退到基础值**（默认 `20`），
 > `0` 仍表示**不限**，非有限值（`NaN` / `Infinity` / `-Infinity` / `1e400`）回退默认，正数原样采用。
 > 基础值本身不可用时再回退到出厂默认 `20`。
+> **v0.5.6 起**：负值回退**产出恰好一条 `console.error` 诊断**（含键名、原始值、生效值）——回退是一次**静默改写用户输入**的动作，按 v0.5.6 建立的「改写必告警」不变式必须出声。
 
 **问题**：`mergeConfig` 对 `maxConsecutive` 只做了有限性校验，**没有下界钳制**
 （`src/config.ts` 的 `mergeConfig`）。负值会被原样写入，运行时判定是
@@ -711,11 +712,19 @@ per-session Timeout 与 per-session Interval 全部残留——测试跑完后�
 - **`startTime` / `endTime` 校验 `HH:MM`**（时 ≤ 23、分 ≤ 59）：非法值**回退为空**
   （= 不限制每日窗口）并告警。
 - **数值钳制**（常量 `MAX_TIMER_DELAY_MS = 2^31 - 1`）：
-  `idleDelayMs` / `minIntervalMs` / `userGraceMs` 的**负值钳到 0**；
+  `idleDelayMs` / `minIntervalMs` 的**负值钳到 0 并告警**；
   `intervalMs` / `idleDelayMs` / `minIntervalMs` **超过上限**时钳到上限并告警。
   `intervalMs` 的 `0 = 关闭周期检查` 语义保持可达（只对正值套用 1s 下限）。
+- **v0.5.6 建立的不变式**：任何**被静默改写**的配置值都产出**恰好一条** `console.error`
+  （含键名、原始值、生效值）；**合法值零诊断**。覆盖范围：负值钳 0、`intervalMs` 正值低于
+  1s 地板、`intervalMs` / `idleDelayMs` / `minIntervalMs` 超 `2^31-1`、`maxConsecutive` 负值回退、
+  `watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` 负值钳 0、`verifyTimeoutMs` 越界、
+  `verifyMaxIterations` 越界、6 个数组键剔除空串。
+  静默的合法值：`intervalMs = 0`、`userGraceMs = 0`、`watchTimeoutMs = 0`、`selfEchoWindowMs = 0`、
+  `maxConsecutive = 0`、`verifyMaxIterations = 0`，以及各上下限本身。
 
-> 注意：`verifyTimeoutMs` / `verifyMaxIterations` / `watchTimeoutMs` 的既有钳制保持不变。
+> 注意：`verifyTimeoutMs` / `verifyMaxIterations` / `watchTimeoutMs` 的既有钳制**边界不变**，
+> 变化只是从静默改为告警。
 
 ### 11.2 错误匹配串统一
 

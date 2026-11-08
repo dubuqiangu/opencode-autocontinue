@@ -5,15 +5,15 @@ OpenCode V2 插件：自动续跑「总任务未完成就被中断」的会话�
 ## 效果示意
 
 ```text
-/autocontinue on      → toast 标题 "Autocontinue" / 正文 "Watch enabled (watching)"，footer 出现 [AC ●]
-/autocontinue status  → toast 标题 "Autocontinue" / 正文 "Watching · watching · 0 injections"
+/autocontinue on      → toast 标题 "Autocontinue" / 正文 "Watch enabled"，footer 出现 [AC ●]
+/autocontinue status  → toast 标题 "Autocontinue" / 正文 "on watch · 0 injections"
 /autocontinue off     → toast 标题 "Autocontinue" / 正文 "Watch disabled"，footer 指示消失，侧栏块隐藏
 
 footer:  [AC ●] watching | [AC ✓] done | [AC ⏸] paused | [AC ⏹ N] stopped | [AC ⏹ N · watch timeout] stopped（带停止原因）
-sidebar: ⏱ 3m 22s / 🔄 5 injections (2 this round) / 🎯 watching
+sidebar: ⏱ 3m 22s / 🔄 5 injections (2 this round) / 🎯 on watch
 ```
 
-停止后 `status` 会多带一段原因：`Watching · stopped · 5 injections · watch timeout`。
+停止后 `status` 会多带一段原因：`stopped · 5 injections · watch timeout`。
 
 ## 关键特性
 
@@ -77,7 +77,7 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue   # 卸载
 | 功能 | 入口 | 说明 |
 |---|---|---|
 | footer 状态指示 | 自动 | `[AC ●]` watching / `[AC ✓]` done / `[AC ⏸]` paused / `[AC ⏹ N]` stopped / `[AC ⏹ N · <原因>]` stopped（[docs/features/footer.md](docs/features/footer.md)） |
-| 侧边栏 Watch 块 | 自动 | `⏱ 时长 / 🔄 N injections / 🎯 state`，另附 `🚫 N rejection(s)` / `🛠 N tool failure(s)`（[docs/features/footer.md](docs/features/footer.md)） |
+| 侧边栏 Watch 块 | 自动 | `⏱ 时长 / 🔄 N injections / 🎯 状态标签`，另附 `🚫 N rejections` / `🛠 N tool failures`（[docs/features/footer.md](docs/features/footer.md)） |
 | slash 命令 | `/autocontinue on\|off\|status` | 每会话值守开关（[docs/features/commands.md](docs/features/commands.md)） |
 | 自动续跑引擎 | 自动 | retry 第一道防线 + 事件驱动注入，含全部停止条件（[docs/features/engine.md](docs/features/engine.md)） |
 | 配置系统 | 配置文件 | 全局 + 项目覆盖，deep merge，BOM 容错 JSONC（[docs/features/config.md](docs/features/config.md)） |
@@ -104,7 +104,7 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue   # 卸载
 - **server 侧源码由 OpenCode 运行时直接解析**，不需要构建；改动 `src/` 下的 server 模块直接生效。
 - **TUI 侧必须构建**：`exports["./tui"]` 指向预构建的 `dist/tui.js`，改了 `src/tui.tsx` 不跑 `npm run build:tui` 就什么都不会生效。
 - 语法快检：`node --experimental-strip-types --check src/<file>.ts`
-- 单测：`npm test`（等价于 `node --experimental-strip-types --test "test/*.test.ts"`，覆盖全部 12 个测试文件、252 个用例，跑完自行退出，不需要 `--test-force-exit`）
+- 单测：`npm test`（等价于 `node --experimental-strip-types --test "test/*.test.ts"`，覆盖全部 15 个测试文件、366 个用例，跑完自行退出，不需要 `--test-force-exit`）
 - TUI 打包：`npm run build:tui`（esbuild，`src/tui.tsx` → `dist/tui.js`）
 
 ## 许可
