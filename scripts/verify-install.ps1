@@ -3,7 +3,8 @@
 #
 # Chain: local HEAD pushed -> plugin update (with cache-bust fallback) ->
 #        plugin list commit match -> on-disk installed version match ->
-#        installed file tree mirrors the repo (src/test/docs/dist counts) ->
+#        installed file tree mirrors the published package (src/test/docs/dist
+#        file counts derived from the npm publish manifest) ->
 #        host opencode.json registration -> headless server behavior
 #        (test/install-verify.ts drives setup() with a mock context).
 # Prints a PASS/FAIL line per check; exits 0 only when every check passes.
@@ -45,12 +46,67 @@ function Count-Files {
   return @(Get-ChildItem $Directory -Recurse -File).Count
 }
 
-# What will actually ship: git-tracked files only.
-function Count-TrackedFiles {
-  param([string]$RepositoryRoot, [string]$Path)
-  $trackedPaths = git -C $RepositoryRoot ls-files -- $Path
-  if (-not $trackedPaths) { return 0 }
-  return @($trackedPaths).Count
+# What will actually ship: the npm publish manifest, i.e. the exact file list
+# `npm pack` puts into the tarball. `git ls-files` over-counts, because the npm
+# `files` allow-list may exclude repo files (e.g. manual verification scripts),
+# so the expected counts must come from the publish manifest instead.
+function Get-PublishManifest {
+  param([string]$RepositoryRoot)
+  $stdoutFile = [System.IO.Path]::GetTempFileName()
+  $stderrFile = [System.IO.Path]::GetTempFileName()
+  try {
+    Push-Location $RepositoryRoot
+    try {
+      & npm pack --dry-run --json --silent 1> $stdoutFile 2> $stderrFile
+      $exitCode = $LASTEXITCODE
+    } finally {
+      Pop-Location
+    }
+    $stdoutText = ""
+    if (Test-Path $stdoutFile) { $stdoutText = [System.IO.File]::ReadAllText($stdoutFile) }
+    $stderrText = ""
+    if (Test-Path $stderrFile) { $stderrText = [System.IO.File]::ReadAllText($stderrFile) }
+    if ($exitCode -ne 0) {
+      $stderrNote = ""
+      if ($stderrText.Trim()) { $stderrNote = ": " + $stderrText.Trim() }
+      return @{ Ok = $false; Paths = @(); Error = "npm pack --dry-run exited with code $exitCode" + $stderrNote }
+    }
+    # npm may prepend its own log lines to stdout; the manifest is the first
+    # "[" that is followed by an object, and the array ends at the last "]".
+    $jsonStart = -1
+    for ($index = 0; $index -lt $stdoutText.Length; $index++) {
+      if ($stdoutText[$index] -ne "[") { continue }
+      $rest = $stdoutText.Substring($index + 1).TrimStart()
+      if ($rest.StartsWith("{")) { $jsonStart = $index; break }
+    }
+    $jsonEnd = $stdoutText.LastIndexOf("]")
+    if ($jsonStart -lt 0 -or $jsonEnd -le $jsonStart) {
+      return @{ Ok = $false; Paths = @(); Error = "npm pack --dry-run produced no JSON manifest (stdout: " + $stdoutText.Trim() + ")" }
+    }
+    try {
+      $manifest = ($stdoutText.Substring($jsonStart, $jsonEnd - $jsonStart + 1)) | ConvertFrom-Json
+    } catch {
+      return @{ Ok = $false; Paths = @(); Error = "npm pack --dry-run JSON could not be parsed: " + $_.Exception.Message }
+    }
+    $entries = @(@($manifest)[0].files)
+    if (-not $entries -or $entries.Count -eq 0) {
+      return @{ Ok = $false; Paths = @(); Error = "npm pack --dry-run manifest contains no file entries" }
+    }
+    $paths = @($entries | ForEach-Object { $_.path })
+    return @{ Ok = $true; Paths = $paths; Error = "" }
+  } catch {
+    return @{ Ok = $false; Paths = @(); Error = $_.Exception.Message }
+  } finally {
+    Remove-Item -LiteralPath $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+  }
+}
+
+# Count the manifest entries that live under one published directory.
+# npm always reports forward slashes, on Windows too.
+function Count-ManifestFiles {
+  param([string[]]$ManifestPaths, [string]$DirectoryName)
+  $prefix = $DirectoryName.TrimEnd("/") + "/"
+  return @($ManifestPaths | Where-Object { $_.StartsWith($prefix) }).Count
 }
 
 # Newest install stamp that actually contains a complete package (partial
@@ -85,10 +141,25 @@ $localHead = (git -C $repoRoot rev-parse --short HEAD).Trim()
 $originHead = (git -C $repoRoot rev-parse --short "origin/$defaultBranch").Trim()
 Assert-Check "local HEAD is pushed (HEAD == origin/$defaultBranch)" ($localHead -eq $originHead) "HEAD=$localHead origin=$originHead"
 
-$expectedSrcCount = Count-TrackedFiles $repoRoot "src"
-$expectedTestCount = Count-TrackedFiles $repoRoot "test"
-$expectedDocsCount = Count-TrackedFiles $repoRoot "docs"
-$expectedDistCount = Count-TrackedFiles $repoRoot "dist"
+# Expected file counts come from the publish manifest, so they describe what
+# npm would actually ship — not everything git happens to track.
+$publishManifest = Get-PublishManifest $repoRoot
+if ($publishManifest.Ok) {
+  $expectedSrcCount = Count-ManifestFiles $publishManifest.Paths "src"
+  $expectedTestCount = Count-ManifestFiles $publishManifest.Paths "test"
+  $expectedDocsCount = Count-ManifestFiles $publishManifest.Paths "docs"
+  $expectedDistCount = Count-ManifestFiles $publishManifest.Paths "dist"
+  $publishManifestNote = "manifest files=" + $publishManifest.Paths.Count
+} else {
+  # No manifest -> no valid expectation. The tree checks below fail loudly
+  # instead of silently comparing against a different source of truth.
+  $expectedSrcCount = "unavailable"
+  $expectedTestCount = "unavailable"
+  $expectedDocsCount = "unavailable"
+  $expectedDistCount = "unavailable"
+  $publishManifestNote = "publish manifest unavailable: " + $publishManifest.Error
+  Write-Output ("publish manifest error: " + $publishManifest.Error)
+}
 
 # --- one-click update (returns early — poll for the install below) -----------------
 Set-Location $env:USERPROFILE
@@ -141,10 +212,10 @@ $installedSrcCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "
 $installedTestCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "test") } else { -1 }
 $installedDocsCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "docs") } else { -1 }
 $installedDistCount = if ($installedPkg) { Count-Files (Join-Path $installedPkg "dist") } else { -1 }
-Assert-Check "installed src tree mirrors the repo" ($installedSrcCount -eq $expectedSrcCount) "installed=$installedSrcCount repo=$expectedSrcCount"
-Assert-Check "installed test tree mirrors the repo" ($installedTestCount -eq $expectedTestCount) "installed=$installedTestCount repo=$expectedTestCount"
-Assert-Check "installed docs tree mirrors the repo" ($installedDocsCount -eq $expectedDocsCount) "installed=$installedDocsCount repo=$expectedDocsCount"
-Assert-Check "installed dist tree mirrors the repo" ($installedDistCount -eq $expectedDistCount) "installed=$installedDistCount repo=$expectedDistCount"
+Assert-Check "installed src tree mirrors the published package" ($publishManifest.Ok -and $installedSrcCount -eq $expectedSrcCount) "installed=$installedSrcCount published=$expectedSrcCount $publishManifestNote"
+Assert-Check "installed test tree mirrors the published package" ($publishManifest.Ok -and $installedTestCount -eq $expectedTestCount) "installed=$installedTestCount published=$expectedTestCount $publishManifestNote"
+Assert-Check "installed docs tree mirrors the published package" ($publishManifest.Ok -and $installedDocsCount -eq $expectedDocsCount) "installed=$installedDocsCount published=$expectedDocsCount $publishManifestNote"
+Assert-Check "installed dist tree mirrors the published package" ($publishManifest.Ok -and $installedDistCount -eq $expectedDistCount) "installed=$installedDistCount published=$expectedDistCount $publishManifestNote"
 
 # --- host registration ---------------------------------------------------------------
 $hostConfigPath = Join-Path $env:USERPROFILE ".config\opencode\opencode.json"

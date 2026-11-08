@@ -113,6 +113,58 @@ function resolveSessionID(sources) {
   return slotSessionIDFrom(sources.componentProps) ?? nonEmptyString(sources.cachedSessionID) ?? nonEmptyString(sources.routerSessionID) ?? void 0;
 }
 
+// src/tui-logic.ts
+var STOP_REASON_LABELS = {
+  "window-closed": "window closed",
+  "watch-timeout": "watch timeout",
+  "injection-cap": "injection cap",
+  "verify-limit": "verify limit",
+  "idle-interrupted": "interrupted while idle",
+  "user-interrupted": "stopped by user",
+  "abort-sentinel": "abort sentinel",
+  "title-excluded": "title excluded"
+};
+function stopReasonLabel(reason) {
+  if (reason === void 0) return void 0;
+  return STOP_REASON_LABELS[reason];
+}
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const totalSeconds = Math.floor(ms / 1e3);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor(totalSeconds % 86400 / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+function isWatchState(state) {
+  return state === "watching" || state === "confirming" || state === "stopped" || state === "paused" || state === "done";
+}
+function mergeWatchState(current, change) {
+  const state = change.state;
+  if (!isWatchState(state)) return void 0;
+  if (state === "stopped" && typeof change.stopReason !== "string") return void 0;
+  const merged = {
+    // Keep the fields the event does not carry (`since`, `lastInjectedAt`):
+    // dropping `since` would freeze the sidebar ⏱ to "⏱ …".
+    ...current ?? {},
+    sessionID: change.sessionID,
+    state,
+    injections: change.injections,
+    ...typeof change.totalInjections === "number" ? { totalInjections: change.totalInjections } : {},
+    ...typeof change.rejections === "number" ? { rejections: change.rejections } : {},
+    ...typeof change.verifying === "boolean" ? { verifying: change.verifying } : {},
+    ...typeof change.toolFailureCount === "number" ? { toolFailureCount: change.toolFailureCount } : {},
+    // A live / done round carries no stop reason — drop any stale one left
+    // over from an earlier stopped round.
+    stopReason: state === "stopped" ? change.stopReason : void 0
+  };
+  return merged;
+}
+
 // src/reactive-mount.ts
 import { createElement, insert, setProp } from "@opentui/solid";
 function mountReactiveRoot(render, verticalLayout) {
@@ -144,32 +196,6 @@ function createReactiveSlotMount(verticalLayout) {
 // src/tui.tsx
 import { jsx, jsxs } from "@opentui/solid/jsx-runtime";
 var RPC_ID = "autocontinue";
-function formatDuration(ms) {
-  if (!Number.isFinite(ms) || ms <= 0) return "0s";
-  const totalSeconds = Math.floor(ms / 1e3);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor(totalSeconds % 86400 / 3600);
-  const minutes = Math.floor(totalSeconds % 3600 / 60);
-  const seconds = totalSeconds % 60;
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-var STOP_REASON_LABELS = {
-  "window-closed": "window closed",
-  "watch-timeout": "watch timeout",
-  "injection-cap": "injection cap",
-  "verify-limit": "verify limit",
-  "idle-interrupted": "interrupted while idle",
-  "user-interrupted": "stopped by user",
-  "abort-sentinel": "abort sentinel",
-  "title-excluded": "title excluded"
-};
-function stopReasonLabel(reason) {
-  if (reason === void 0) return void 0;
-  return STOP_REASON_LABELS[reason];
-}
 var tui_default = Plugin.define({
   id: "opencode-autocontinue-tui",
   setup(context) {
@@ -206,9 +232,12 @@ var tui_default = Plugin.define({
       if (!rpc) return;
       try {
         const result = await rpc.status({ sessionID });
-        updateStatus(sessionID, result.state);
+        if (result.watched) {
+          updateStatus(sessionID, result.state);
+        } else {
+          updateStatus(sessionID, void 0);
+        }
       } catch {
-        updateStatus(sessionID, void 0);
       }
     }
     async function setEnabled(sessionID, enabled) {
@@ -299,10 +328,10 @@ var tui_default = Plugin.define({
         metricLines.push(`\u{1F3AF} ${status.state}`);
         if (status.verifying) metricLines.push("\u{1F50D} verifying");
         if (typeof status.rejections === "number" && status.rejections > 0) {
-          metricLines.push(`\u{1F6AB} ${status.rejections} rejection(s)`);
+          metricLines.push(`\u{1F6AB} ${status.rejections} rejection${status.rejections === 1 ? "" : "s"}`);
         }
         if (typeof status.toolFailureCount === "number" && status.toolFailureCount > 0) {
-          metricLines.push(`\u{1F6E0} ${status.toolFailureCount} tool failure(s)`);
+          metricLines.push(`\u{1F6E0} ${status.toolFailureCount} tool failure${status.toolFailureCount === 1 ? "" : "s"}`);
         }
         return metricLines.join("\n");
       });
@@ -442,37 +471,19 @@ var tui_default = Plugin.define({
           const toolFailureCount = event?.data?.toolFailureCount ?? event?.properties?.toolFailureCount;
           const stopReason = event?.data?.stopReason ?? event?.properties?.stopReason;
           if (typeof sessionID !== "string") return;
+          const merged = mergeWatchState(statusOf(sessionID), {
+            sessionID,
+            state: typeof state === "string" ? state : "",
+            injections,
+            totalInjections,
+            rejections,
+            verifying,
+            toolFailureCount,
+            stopReason
+          });
+          if (merged !== void 0) updateStatus(sessionID, merged);
           if (state === "stopped") {
-            if (typeof stopReason === "string") {
-              const current = statusOf(sessionID);
-              updateStatus(sessionID, {
-                ...current ?? {},
-                sessionID,
-                state,
-                injections,
-                ...typeof totalInjections === "number" ? { totalInjections } : {},
-                ...typeof rejections === "number" ? { rejections } : {},
-                ...typeof verifying === "boolean" ? { verifying } : {},
-                ...typeof toolFailureCount === "number" ? { toolFailureCount } : {},
-                stopReason
-              });
-            }
             void refreshStatus(sessionID);
-          } else if (state === "watching" || state === "confirming" || state === "paused" || state === "done") {
-            const current = statusOf(sessionID);
-            updateStatus(sessionID, {
-              ...current ?? {},
-              sessionID,
-              state,
-              injections,
-              ...typeof totalInjections === "number" ? { totalInjections } : {},
-              ...typeof rejections === "number" ? { rejections } : {},
-              ...typeof verifying === "boolean" ? { verifying } : {},
-              ...typeof toolFailureCount === "number" ? { toolFailureCount } : {},
-              // A live / done round carries no stop reason — drop any stale
-              // one left over from an earlier stopped round.
-              stopReason: void 0
-            });
           }
         });
         if (typeof unsubscribe === "function") stopEvents = unsubscribe;

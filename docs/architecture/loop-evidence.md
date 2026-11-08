@@ -6,7 +6,7 @@ API 的核实结论，以及当时已知但未解决的限制。
 配套文档：
 
 - [provenance-and-loop.md](provenance-and-loop.md)——决策与裁定索引（结论先行）。
-- [loop-mechanisms.md](loop-mechanisms.md)——现行机制规格与 v0.5.3 修复规格。
+- [loop-mechanisms.md](loop-mechanisms.md)——现行机制规格与各版本修复规格（§9 起为版本归档）。
 
 ## 阅读约定
 
@@ -24,6 +24,7 @@ API 的核实结论，以及当时已知但未解决的限制。
 - [v0.5.2 风格机制评估落地 + 无人值守护栏](#v052-风格机制评估落地--无人值守护栏)
 - [v0.5.3 本轮](#v053-本轮)
 - [v0.5.4 本轮](#v054-本轮)
+- [v0.5.5 本轮](#v055-本轮)
 - [附录 取证方法与边界](#附录-取证方法与边界)
 
 ---
@@ -87,8 +88,13 @@ type SessionSyntheticOutput = SessionInbox.Synthetic // type:"synthetic"
   **来源元数据嵌在 `item.payload.metadata`**（不是 `item.metadata`）——
   `UserPayload` / `SyntheticPayload` 都带 `metadata?`。
 - `session.inbox.enqueued` 的 `data.item` 即上述 item；`session.synthetic` 为独立事件。
-- 空闲/状态：`session.status`（`busy|retry|idle`）、`session.idle`（**data 无 outcome**）、
+- 空闲/状态（**全部由宿主事件驱动**，插件不主动查询、不做定时查询）：
+  `session.status`（`busy|retry|idle`）、`session.idle`（**data 无 outcome**）、
   `session.execution.started|succeeded|failed|interrupted`、`session.retry.scheduled`、`session.step.*`。
+- 忙 / 活跃判定由事件**派生**，不存在 `session.status` 查询：`session.status` 的 `busy|retry`
+  刷新 `lastBusyAt` / `lastActiveAt`；`session.execution.started`、`session.step.started`、
+  `session.step.streamed` 刷新 `lastActiveAt`。引擎只比较这两个时间戳
+  （`lastBusyAt` 60 秒窗口、`lastActiveAt` `idleDelayMs` 窗口），不做定时查询等待。
 - ⚠️ 本机 V2 schema **不存在** `message.updated` 与 `session.error`（实测 grep 全 schema 零命中）。
   引擎里对应分支属 V1 遗留/死路径；完成检测实际靠 idle → `maybeInject` 复查兜底，
   故为「延迟」非「漏判」。**清理属独立后续项，不在本阶段改。**
@@ -96,8 +102,8 @@ type SessionSyntheticOutput = SessionInbox.Synthetic // type:"synthetic"
 #### 1.3 子进程
 
 - 插件模块运行在宿主真实运行时，**非沙箱**。本机同级插件实证可用：
-  `opencode-plugin-otel/src/headers.ts:92`（`Bun.spawn`）、
-  `billion-context/pi-subagents/src/delegate-tool.ts:5`（`node:child_process`）。
+  `opencode-plugin-otel/src/headers.ts`（`Bun.spawn`）、
+  `billion-context/pi-subagents/src/delegate-tool.ts`（`node:child_process`）。
 - 我方 server bundle 是 esbuild `--platform=node`，可 `import { spawn } from "node:child_process"`。
 - @librarian 提示：这是**未文档化/不受支持**的机制（宿主无 `ctx.exec`/`ctx.spawn`），
   跨版本可能失效。故 `runVerification` 必须可注入 spawn 适配器、并在命令无法启动时降级为 `pass=true`（视为无法验证 → 沿用模型完成信号，避免无限升级，见 §3.4）。
@@ -128,7 +134,7 @@ type SessionSyntheticOutput = SessionInbox.Synthetic // type:"synthetic"
 #### 2.3 自回声兜底（**本阶段新增，host-agnostic 保底**）
 
 > @oracle #6：`metadata`/`synthetic` 是否真的**回流**到引擎稍后读到的消息，属假设；
-> 且有实证缺口——原代码从未真正传过 `resume`（`docs/features/engine.md:32` 的
+> 且有实证缺口——原代码从未真正传过 `resume`（`docs/features/engine.md` 的
 > `resume:true` 描述与实现不符，属文档 bug，本阶段一并修正）。
 
 **引擎本来就知道自己何时注入过** → 用「自回声」记录作为不依赖宿主行为的保底判定：
@@ -277,7 +283,7 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 
 **缺陷**：`src/verify.ts` 的 `defaultSpawn` 里 `stdout += String(chunk)` / `stderr += String(chunk)`
 **无上限累积**——啰嗦命令（失败测试全量输出）可撑爆内存，且失控早于超时。
-（dsh-pua 边读边截 `maxBytes: 8192`，`runtime.ts:100-101`。）
+（dsh-pua 边读边截 `maxBytes: 8192`，见 dsh-pua `runtime.ts`。）
 
 **落地**：
 
@@ -291,7 +297,7 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 
 ### 7.2 ② abort/pause 哨兵 + `paused` 状态
 
-**语义**：成对标签（对齐 dsh-pua，`runtime.ts:572-581`），判定顺序 **abort → pause → done**。
+**语义**：成对标签（对齐 dsh-pua，`runtime.ts`），判定顺序 **abort → pause → done**。
 模型可主动「放弃」（abort → 停止）或「求助」（pause → 暂停，等待用户补充后恢复）。
 
 **配置新增**（`src/config.ts`）：
@@ -330,7 +336,7 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 ### 7.3 ③ 升级提示阈值化 + 轮次压力梯
 
 **改动**：删除「整条替换的两档」`escalationMessages`（**breaking**，v0.5.0 记录），
-改为「基础提示 + 阈值追加」，对齐 dsh-pua（`runtime.ts:612-649`）。
+改为「基础提示 + 阈值追加」，对齐 dsh-pua（`runtime.ts`）。
 
 **配置**（`src/config.ts`）：
 
@@ -374,17 +380,17 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 以下两处与原版**不等价**，均为有意为之，记录在此以免后续被误判为「移植遗漏」：
 
 1. **压力梯的挂载变量不同。** 3/7/15/30/50 这组阈值取自 dsh-pua 的**迭代计数**表
-   （`src/runtime.ts:636-649`，`loop.iteration` 递增后取档），但我方的触发变量是
-   **验证拒绝数**（`src/engine.ts:157-173` 取档，`src/engine.ts:415-416` 递增）。
+   （`src/runtime.ts`，`loop.iteration` 递增后取档），但我方的触发变量是
+   **验证拒绝数**（`src/engine.ts` 的 `selectPressureMessage` 按拒绝数取档，`runVerifyGate` 记录拒绝时递增）。
    **保留「按拒绝数」**：在我方设计中只有「独立检查判定不通过」才与原版的迭代语义
    等价——`loop.iteration` 把未经验证的续跑轮次也计入，噪声更大。
    **代价必须写明**：我方的压力升级在**墙钟意义上比 dsh-pua 更晚**。
    dsh-pua 另有一张按拒绝数分的 3 档表
-   （`assets/pua/upstream/skills/pua-loop/SKILL.md:57-63`），我方 `≥3` / `≥5`
+   （`assets/pua/upstream/skills/pua-loop/SKILL.md`），我方 `≥3` / `≥5`
    两档阈值即取自该表。
 2. **阈值是叠加而非互斥。** dsh-pua 用 `else-if`
-   （`src/runtime.ts:614-618`：≥5 只给根因句、REASSESS 被丢掉）；我方在 ≥5 时
-   **两条都加**（`src/engine.ts:181-182`）。**保留叠加**：「列 3 个不同假设」与
+   （`src/runtime.ts` 的 Oracle 升级分支：≥5 只给根因句、REASSESS 被丢掉）；我方在 ≥5 时
+   **两条都加**（`src/engine.ts` 的 `composeRejectionPrompt`）。**保留叠加**：「列 3 个不同假设」与
    「你可能在解决错误的问题」互补不矛盾，且最深档最需要双提示。
    行为已由 `test/server.test.ts` 的 `composeRejectionPrompt` 用例锁定。
 
@@ -422,7 +428,7 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 
 ### 7.5 ⑤ 工具失败观测计数器（opt-in）
 
-**语义**（对齐 dsh-pua `runtime.ts:263-279`，刻意**不是**任务失败数，只作观测）：
+**语义**（对齐 dsh-pua `runtime.ts`，刻意**不是**任务失败数，只作观测）：
 去重（滚动窗口）+ 成功清零。
 
 - 配置：`observeToolFailures: boolean`（默认 **false**，opt-in）。
@@ -449,7 +455,7 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
   `const GRACE_MS = 1_000`；新增 `stopGracefully()`：`try { child.kill() }`，
   再 `setTimeout(killTree, GRACE_MS)` 强杀进程树；timeout/abort 改调 `stopGracefully()`。
   `fallbackTimer` 保留（保证 Promise 一定 resolve）。
-- **范围钳制**（`src/config.ts`，对齐 dsh-pua `configuration.ts:21-32`）：
+- **范围钳制**（`src/config.ts`，对齐 dsh-pua `configuration.ts`）：
   - `verifyTimeoutMs`: `clamp(1_000, 3_600_000)`（1s..3600s）。
   - `verifyMaxIterations`: `clamp(0, 10_000)`。
 
@@ -480,19 +486,19 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 
 | ID | 级别 | 位置 | 裁定 |
 |---|---|---|---|
-| F1 | **高** | `engine.ts:414` `startTimeNotReached` | **修**：跨午夜窗口在次日 00:00–startTime 之间被误判「未到点」而不注入 |
-| F2 | **高** | `engine.ts:334` `runVerifyGate` | **修**：验证前的 TOCTOU——await 期间用户新消息 bump `roundId`，导致陈旧结果被当新轮，误 `done`/注入 |
+| F1 | **高** | `engine.ts` 的 `startTimeNotReached` | **修**：跨午夜窗口在次日 00:00–startTime 之间被误判「未到点」而不注入 |
+| F2 | **高** | `engine.ts` 的 `runVerifyGate` | **修**：验证前的 TOCTOU——await 期间用户新消息 bump `roundId`，导致陈旧结果被当新轮，误 `done`/注入 |
 | F4 | 中 | `config.ts` `mergeConfig` | **修**：数值键不校验有限性，`1e400`→`Infinity` 触发 hot timer |
-| F5 | 中 | `config.ts:188` `parseJsonc` | **修**：尾逗号正则不做字符串边界跟踪，字符串内的 `,}`/`,]` 被吃掉 |
+| F5 | 中 | `config.ts` 的 `parseJsonc` | **修**：尾逗号正则不做字符串边界跟踪，字符串内的 `,}`/`,]` 被吃掉 |
 | F6 | 中 | `rpc.ts` `state.changed` schema | **修**：TUI 读 `toolFailureCount`，但事件 schema/`WatchStatusEvent`/发射端均未携带（`additionalProperties:false` 会丢弃） |
-| F7 | 低 | `engine.ts:621-636` `latestAssistantText` | **修**：工具 part 仅在 assistant 消息内扫描，V1 `tool_result` 永远扫不到 → 计数器对 V1 失效 |
-| F9 | 低 | `verify.ts:178` `stopGracefully` | **修**：grace 定时器未跟踪/未清理，resolve 后仍会 +1s 触发 killTree |
-| F12 | 低 | `verify.ts:193,196` | **修**：`String(chunk)` 非增量解码，跨 chunk 的多字节字符被替换为 U+FFFD |
-| F11 | 低 | `state.ts:247-249` `resume` | **只修注释 + 补测**：代码是「窗口已过则关闭 endAt」，注释却写「重算 endAt」；行为保留（改行为有回归风险，另议） |
+| F7 | 低 | `engine.ts` 的 `latestAssistantText` | **修**：工具 part 仅在 assistant 消息内扫描，V1 `tool_result` 永远扫不到 → 计数器对 V1 失效 |
+| F9 | 低 | `verify.ts` 的 `stopGracefully` | **修**：grace 定时器未跟踪/未清理，resolve 后仍会 +1s 触发 killTree |
+| F12 | 低 | `verify.ts` 的 stdout / stderr 收集 | **修**：`String(chunk)` 非增量解码，跨 chunk 的多字节字符被替换为 U+FFFD |
+| F11 | 低 | `state.ts` 的 `resume` | **只修注释 + 补测**：代码是「窗口已过则关闭 endAt」，注释却写「重算 endAt」；行为保留（改行为有回归风险，另议） |
 | F3 | 中 | 设计面 | **只记录**：模型转述验证输出可反射哨兵/完成标记。缓解需要脆弱启发式；verify 模式已用 exit code 消解完成判定，记入 `known-issues.md` |
-| F8 | 低 | `engine.ts:487/493` | **修（小改）**：abort 哨兵移到 `backgroundWorkRunning` 守卫之前（显式 abort 必须生效）；pause 保持在守卫之后 |
+| F8 | 低 | `engine.ts` 的 abort / pause 哨兵判定 | **修（小改）**：abort 哨兵移到 `backgroundWorkRunning` 守卫之前（显式 abort 必须生效）；pause 保持在守卫之后 |
 | F10 | — | `engine.forgetSession` | **无需动作**：`unwatch()` 已清 `inMemory`；`getMemory` 惰性重建只对仍在值守的会话发生 |
-| F13 | 低 | `engine.ts:862-933` | **只记录**：assistant 事件路径不判哨兵，靠随后的 `session.idle` 兜底（默认最多延迟一个 `intervalMs`） |
+| F13 | 低 | `engine.ts` 的 assistant 事件分支 | **只记录**：assistant 事件路径不判哨兵，靠随后的 `session.idle` 兜底（默认最多延迟一个 `intervalMs`） |
 
 ### 8.2 修复规格
 
@@ -510,7 +516,7 @@ escalationMessages: string[]   // 默认两档；空数组 → 回退到 message
 `typeof x === "number" && Number.isFinite(x)`；钳制键在钳制前也要求有限（`verifyTimeoutMs`/`verifyMaxIterations`）。
 确保 `1e400`/`NaN`/`-Infinity` 一律回退默认。
 
-**F5 字符串感知尾逗号**：删除 `config.ts:188` 的事后正则，改为在同一字符扫描内处理——
+**F5 字符串感知尾逗号**：删除 `config.ts` 的 `parseJsonc` 事后正则，改为在同一字符扫描内处理——
 `!inString` 且当前字符为 `,` 时，向前跳过空白，若下一个非空白字符是 `}` 或 `]` 则不写入该逗号。
 空 tag 语义不变；保持单引号归一、`\'`/`""` 转义、注释剥离等既有行为。新增导出或保持私有均可，但不得改变 `parseJsonc` 签名。
 
@@ -529,7 +535,7 @@ pause 块保持在守卫之后。测试锁定：`backgroundWorkRunning=true` 时
 **F9/F12 verify.ts**：`stopGracefully` 用 `let graceTimer` 跟踪 `setTimeout(killTree, GRACE_MS)`，并在 `finish` 中 `clearTimeout(graceTimer)`；
 stdout/stderr 改用 `new StringDecoder("utf8")`（每个流一个）`.write(chunk)` 增量解码，替代 `String(chunk)`。
 
-**F11 注释对齐**：`state.ts:244-249` 注释改为准确描述「窗口已过时置 0（关闭当日截止），不重算」；新增单测锁定该行为。
+**F11 注释对齐**：`state.ts` 的 `resume` 注释改为准确描述「窗口已过时置 0（关闭当日截止），不重算」；新增单测锁定该行为。
 
 ### 8.3 本轮删除
 - `state.ts` `resetInjectionCount`（导出的死代码，`src/` 无调用）——删除。
@@ -547,7 +553,7 @@ stdout/stderr 改用 `new StringDecoder("utf8")`（每个流一个）`.write(chu
 - 生命周期：`resumeKeepAlives`、`forgetSession`、`abortVerify` 至少各一条。
 
 ### 8.5 文档同步（本轮）
-`features/config.md`（`endTime` 默认实为 `""`）、`features/commands.md`（事件载荷字段、`N injection(s)`）、
+`features/config.md`（`endTime` 默认实为 `""`）、`features/commands.md`（事件载荷字段、注入次数文案：`1 injection` / `N injections`）、
 `features/engine.md`（两阶段 done、`injections` 而非 `consecutive`、abort 真实来源）、
 `architecture/events-and-state.md`（状态联合补 `confirming`/`paused`、存储字段、mermaid）、
 `architecture/module-layout.md`（补 `verify.ts`/`reactive-mount.ts`、`AUTOCONTINUE_RPC_CONTRACT` 非 `Rpc.define`）、
@@ -571,28 +577,28 @@ stdout/stderr 改用 `new StringDecoder("utf8")`（每个流一个）`.write(chu
 
 | # | 机制 | 出处 | 变化维度 | 数量 |
 |---|---|---|---|---|
-| A1 | **风味 Flavor** | `src/flavors.ts:2-18`、`flavor-helper.sh:111-261` | 语气线 `PUA_L1..L4` + 关键词表 + 方法论 md | 15 套 |
-| A2 | **模式 Mode** | `src/content.ts:5-6` | 人设 / 角色层级 / 语言 | 11 种（真语气变体：`yes` `mama` `shot` `pua-en` `pua-ja`） |
-| A3 | **挫败感质量纠偏** | `frustration-trigger.sh:33`、`runtime.ts:207-210` | 命中真实用户抱怨 → 注入纠偏提示 | 1 模板 × 15 语气线 |
-| A4 | **失败升级候选 L1–L4** | `hook-content.ts:35-58`、`failure-detector.sh:182-261` | 连续终态失败 2→L1 / 3→L2 / 4→L3 / 5+→L4，含强制动作块与风道路由块 | 4 档 × 15 风味 |
-| A5 | **Loop 迭代压力** | `runtime.ts:636-649` | 2-3/4-7/8-15/16-30/31-50/51+ | 6 档 |
-| A6 | **Oracle 拒绝升级** | `runtime.ts:612-618` | 1-2 基础 / 3-4 REASSESS / 5+ 退回需求 | 3 档 |
+| A1 | **风味 Flavor** | `src/flavors.ts`、`flavor-helper.sh` | 语气线 `PUA_L1..L4` + 关键词表 + 方法论 md | 15 套 |
+| A2 | **模式 Mode** | `src/content.ts` | 人设 / 角色层级 / 语言 | 11 种（真语气变体：`yes` `mama` `shot` `pua-en` `pua-ja`） |
+| A3 | **挫败感质量纠偏** | `frustration-trigger.sh`、`runtime.ts` | 命中真实用户抱怨 → 注入纠偏提示 | 1 模板 × 15 语气线 |
+| A4 | **失败升级候选 L1–L4** | `hook-content.ts`、`failure-detector.sh` | 连续终态失败 2→L1 / 3→L2 / 4→L3 / 5+→L4，含强制动作块与风道路由块 | 4 档 × 15 风味 |
+| A5 | **Loop 迭代压力** | `runtime.ts` | 2-3/4-7/8-15/16-30/31-50/51+ | 6 档 |
+| A6 | **Oracle 拒绝升级** | `runtime.ts` | 1-2 基础 / 3-4 REASSESS / 5+ 退回需求 | 3 档 |
 
-附带事实：上游 `flavor-helper.sh:263-299` 的 16 条 `PUA_LANGUAGE=zh` 中文覆盖语气线，
-在 DSH 移植里是**死代码**（`hook-content.ts:20` 的正则只匹配 4 空格缩进的顶层 case）。
-dsh-pua 的 i18n **只覆盖 UI**（`src/i18n.ts:4`「模型侧 prompt 与服务端回复不在本地化范围」），
+附带事实：上游 `flavor-helper.sh` 的 16 条 `PUA_LANGUAGE=zh` 中文覆盖语气线，
+在 DSH 移植里是**死代码**（`hook-content.ts` 的正则只匹配 4 空格缩进的顶层 case）。
+dsh-pua 的 i18n **只覆盖 UI**（`src/i18n.ts` 注明「模型侧 prompt 与服务端回复不在本地化范围」），
 英/日语境是独立整篇 skill（`pua-en` 344 行 / `pua-ja` 278 行）。
 
 ### 9.2 逐项裁定
 
 | 候选 | 裁定 | 决定性理由 |
 |---|---|---|
-| 风味 / 方法论预设 / 味道路由 | **不移植** | 需 `ctx.systemPrompt.section` / `ctx.commands.register`（dsh-pua `src/index.ts:37-70`）；我方 `ServerContext` 只有 storage / `session.prompt|synthetic|hook|context|get` / `event.subscribe` / `rpc.register`（`src/index.ts:14-48`）。且 dsh-pua 的 auto 路由**不是代码算的**——是把 `methodology-router.md` 塞进 prompt 让模型路由，与我方「零模型成本」冲突 |
-| 人设 P7/P9/P10 + verifier/self-reviewer/policy-guardian | **不移植** | 需 agent 注册 / 子代理派生；且我方验证门控**严格更强**（只认真实 exit code，`src/engine.ts:405-411`；dsh-pua 的 verifier 只出建议且禁改文件） |
+| 风味 / 方法论预设 / 味道路由 | **不移植** | 需 `ctx.systemPrompt.section` / `ctx.commands.register`（dsh-pua `src/index.ts`）；我方 `ServerContext` 只有 storage / `session.prompt|synthetic|hook|context|get` / `event.subscribe` / `rpc.register`（`src/index.ts` 的 `ServerContext`）。且 dsh-pua 的 auto 路由**不是代码算的**——是把 `methodology-router.md` 塞进 prompt 让模型路由，与我方「零模型成本」冲突 |
+| 人设 P7/P9/P10 + verifier/self-reviewer/policy-guardian | **不移植** | 需 agent 注册 / 子代理派生；且我方验证门控**严格更强**（只认真实 exit code，见 `src/engine.ts` 的 `runVerifyGate`；dsh-pua 的 verifier 只出建议且禁改文件） |
 | A4 失败升级候选（L1-L4 + checklist） | **不移植** | 行为内容（五步法 / 七项 checklist / 结构化失败报告）我方用户现在就能贴进 `escalationPressureLadder`；其**自动选择器**依赖上述缺失 API。另：我方 `observeToolFailures` 只观测不行动，这一点的差距由 P3 的护栏部分补偿 |
 | i18n | **不移植** | dsh-pua 模型侧本就不本地化；我方 prompt 是用户自己的配置字符串 |
-| 降压换框 / 钉味提醒库 / stop-feedback | **不移植** | 降压由 **LLM 判定**（`de-escalation-protocol.md:17,90,121-124`）且需按风味说人话；钉味的**行为诉求**（「体感是输入，验收看证据链」）已被我方 exit-code 门控**机械覆盖**；stop-feedback 需 `jq` + `transcript_path` + 本地计数文件（`stop-feedback.sh:11,31-50`） |
-| **A3 挫败感触发** | **缩减后借鉴（P2）** | 唯一机械可移植：我方已能区分真实用户消息与自回声（`src/engine.ts:879-916`）。但 dsh-pua 把它**挂在同一轮**（`runtime.ts:207-210` 的 `decision.messages.push`），我方只有「新开一轮」的通道 → 降级为「装饰下一次本来就要发的注入」 |
+| 降压换框 / 钉味提醒库 / stop-feedback | **不移植** | 降压由 **LLM 判定**（`de-escalation-protocol.md`）且需按风味说人话；钉味的**行为诉求**（「体感是输入，验收看证据链」）已被我方 exit-code 门控**机械覆盖**；stop-feedback 需 `jq` + `transcript_path` + 本地计数文件（`stop-feedback.sh`） |
+| **A3 挫败感触发** | **缩减后借鉴（P2）** | 唯一机械可移植：我方已能区分真实用户消息与自回声（`src/engine.ts` 的真实用户消息分支）。但 dsh-pua 把它**挂在同一轮**（`runtime.ts` 的 `decision.messages.push`），我方只有「新开一轮」的通道 → 降级为「装饰下一次本来就要发的注入」 |
 
 ### 9.3 P1 文档记录
 
@@ -616,24 +622,24 @@ frustrationMessage: string
 - 默认：`frustrationTriggers: []`（**默认关闭**，与 `observeToolFailures: false` 同先例——
   误判会把一句斥责塞进正常轮次）；`frustrationMessage` 默认文案：
   `用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。`
-- 合并：数组**替换**（与 `escalationPressureLadder` 同规则：`:279-285`），字符串覆盖。
+- 合并：数组**替换**（与 `escalationPressureLadder` 同规则），字符串覆盖。
 
 **检测**（`src/engine.ts` 的真实用户消息分支）：
 
-- 位置：自回声 `break` **之后**（V2 分支 `engine.ts:880-883`、V1 分支 `engine.ts:906-909`），
+- 位置：自回声 `break` **之后**（V2 分支与 V1 分支各自的用户消息处理处），
   确保插件自己的注入回流永远不会触发。
-- 文本来源：V2 `item.payload.text`（`engine.ts:874-875`）、V1 `messageText(info.parts)`（`engine.ts:903-905`）。
+- 文本来源：V2 `item.payload.text`、V1 `messageText(info.parts)`。
 - 匹配：**大小写不敏感的子串匹配**，不用正则、不搬运 dsh-pua 的正则表
-  （`frustration-trigger.sh:33` 含「加油/验收/闭环/口径」等过泛词）。命中任一子串即算命中。
+  （`frustration-trigger.sh` 含「加油/验收/闭环/口径」等过泛词）。命中任一子串即算命中。
 
 **副作用**：
 
-1. `InMemoryState` 新增 `frustrationPending: boolean`（`src/state.ts:13-38`，初值 `false`）。
+1. `InMemoryState` 新增 `frustrationPending: boolean`（`src/state.ts` 的 `InMemoryState`，初值 `false`）。
 2. `WatchStore.resume(sessionID, recomputeEndAt = false, preserveRejections = false)` 新增第三参：
    为 `true` 时**跳过** `entry.rejections = 0`，但**仍** `entry.roundId += 1`
    （在飞的验证结果必须照常作废）。理由：用户抱怨本身就是「上一轮交付被否」的证据，
    此时清零计数恰好是错的。
-3. 落点在 `injectAndRecord`（`src/engine.ts:307-316`）——所有注入的唯一漏斗：
+3. 落点在 `injectAndRecord`（`src/engine.ts`）——所有注入的唯一漏斗：
    若 `memory.frustrationPending && cfg.frustrationMessage` 非空，则
    **在调用 `injectContinuation` 之前**把提醒句以 `\n\n` 追加到待发文本，并清标志。
    必须在 `injectContinuation` 之前合成，保证自回声记录用的是**实际发送的文本**。
@@ -670,12 +676,12 @@ export type StopReason =
 
 - `WatchState` 新增 `stopReason?: StopReason`（持久化字段，`src/state.ts`）。
 - `WatchStore.markStopped(sessionID, reason?: StopReason)` 写入原因。
-- 引擎各停止点传入对应原因（`engine.ts` 的 418 / 454 / 463 / 472 / 488 / 529 / 825 / 844）。
+- 引擎各停止点传入对应原因（`engine.ts` 的 `maybeInject` / `runVerifyGate` / 中断事件分支 / 标题排除分支）。
 - RPC：`WatchStatus`、`WatchStatusEvent` 与 `state.changed` schema 增 `stopReason`
   （schema 用 `enum` 列出全部取值；`additionalProperties:false` 故必须显式声明）。
 - TUI：**footer 指示**（`[AC ⏹ N · 短语]`）与 **`/autocontinue status` 命令 toast** 显示原因文案
   （人类可读，不直接暴露枚举值）。**侧栏块保持既有契约**——终态（`done`/`stopped`）不渲染侧栏
-  （`src/tui.tsx:249`），停止原因只出现在 footer 与 toast 两处。
+  （`src/tui.tsx` 的侧栏渲染），停止原因只出现在 footer 与 toast 两处。
 
 ### 9.6 补测清单
 
@@ -723,7 +729,7 @@ export type StopReason =
 
 ## v0.5.4 本轮
 
-> 本节记录 v0.5.4 当时的状态；本节之后暂无后续版本节。
+> 本节记录 v0.5.4 当时的状态；后续变更见 v0.5.5 节。
 
 本轮是 v0.5.3 之上的三项技术债清理，**无用户可见行为变更**。
 
@@ -731,8 +737,59 @@ export type StopReason =
 - 测试不再改写 `USERPROFILE` / `HOME` 这类进程级环境变量来隔离真实用户配置——进程级全局状态在同进程并行跑测试时会互相污染。
 - 测试夹具去重：`test/server.test.ts` 自带的 `FakeStorage` / `makeFakeSession` / 引擎注册表删除，统一改用共享夹具 `test/support/harness.ts`。
 - 测试断言改为与配置常量比对，不再把默认续跑消息的中文文案硬编码在测试里。
+  **（后续更正：此项只完成了一部分——`test/server.test.ts` 中仍有中文文案字面量断言，如
+  `/^继续执行/`、`/整体检查/`。v0.5.5 未补完，见下节「本版没有做的事」。）**
 
 本轮仍未做实机验证的三项不变：跨午夜窗口、验证 TOCTOU、`stopReason` 的 footer / toast 显示效果。
+
+---
+
+## v0.5.5 本轮
+
+> 本节记录 v0.5.5 的取证与落地记录；完整的增量清单见
+> [docs/decisions/changelog.md 的 v0.5.5 节](../decisions/changelog.md#v055)，
+> 机制规格见 [loop-mechanisms.md §11](loop-mechanisms.md#11-v055-增量)。
+
+本轮是**加固轮**：配置解析与诊断、护栏与生命周期、TUI 状态指示、验证进程终止、脱敏扫描器。
+
+### 取证与裁定
+
+- **配置诊断**：配置文件**不存在**属正常路径（静默回退默认值）；**读取失败**或
+  **解析失败**时输出一条含**绝对路径**的 `console.error`，随后回退默认值。
+  此前「配置写错了却毫无提示」。
+- **配置值校验**：6 个数组键剔除空串；`markerRegex` 做长度上限（1024）、嵌套量词
+  （ReDoS）与可编译三重检查；`startTime` / `endTime` 校验 `HH:MM`；数值键负值钳到 0、
+  超过 `2^31-1` 钳到上限并告警。全部告警走 `console.error`，**不静默丢弃**。
+- **错误匹配串统一**：`src/events.ts` 的 `errorToMatchString` 在 `name` 缺失时回退读
+  `type`——retry hook 路径与消息事件路径从此产出**同一个**匹配串。
+- **回声幂等**：注入记录在整个 `selfEchoWindowMs` 窗口内保持有效。宿主把同一条注入
+  以两种事件形状各投递一次时，此前**第二次**投递会被当成真实用户消息，触发 `resume()`
+  并清零**注入上限 / 验证失败计数 / 轮次墙钟**三重上界。
+- **回声时间窗兜底**：入站文本提取不到且窗口内确有自注入记录时判为回声——
+  此前文档已承诺、代码里不存在的行为。**残留风险**（真实用户消息在窗口内且无可提取
+  文本时被吞）已记入 `docs/decisions/known-issues.md`，本版不修。
+- **`roundId` 进程级全局单调递增**：此前从 0 重新开始，off → on 之后陈旧的验证结果
+  可能被当成新一轮的结果。
+- **在途注入锁与每轮缓存拆分**：`watch()` 重置每轮缓存但不清除在途注入锁；`unwatch()` 两者都清。
+- **引擎 disposed 守卫**：disposed 后不再新建定时器、不再改写持久化状态。
+- **final-check 复检**：完成复查轮的注入在 await 之后复检会话是否仍被值守。
+- **定时器延迟钳制**：引擎排出的每个定时器延迟都钳到 `2^31-1`——超限值此前会退化成 1ms 热循环。
+- **配置读取位置前移**：非值守会话的事件不再白读两次盘；回声判断复用已加载的配置。
+- **TUI 状态指示保留**：查询 watch 状态失败时保留原有指示，仅当服务端明确回答「未在值守」时才移除条目。
+- **验证进程终止的未捕获异常**：`src/verify.ts` 的 Windows 进程树终止助手补上 spawn 失败监听。
+- **TUI 纯逻辑抽离**：停止原因文案表、时长格式化、watch 状态合并从 `src/tui.tsx` 抽出到
+  新建的 `src/tui-logic.ts`，可直接单测。
+- **脱敏扫描器扩充**：规则扩为 12 条模式，修正 Telegram token 匹配形状，补充本机用户名形态。
+
+### 本版**没有**做的事
+
+- **存储多实例丢行未修**：值守列表仍按单一存储键 `opencode-autocontinue.watched` 保存，
+  多实例并发写会互相覆盖丢行。按会话分键属破坏性存储布局变更，需另给迁移与向后兼容方案。
+- **回声时间窗兜底的残留风险未消除**。
+- **三项实机验证仍未做**：跨午夜时间窗口语义、验证流程的 TOCTOU 竞态、
+  `stopReason` 在 footer 与 toast 中的实际渲染。
+- **v0.5.4 的「测试解除文案硬编码」只完成了一部分**：默认续跑消息与 `finalCheckMessage`
+  的中文文案前缀仍以字面量出现在断言里，本版未补完。
 
 ---
 
@@ -740,7 +797,7 @@ export type StopReason =
 
 ### 验证方法
 
-1. **单测**（`node --experimental-strip-types --test --test-force-exit test/*.test.ts`）：
+1. **单测**（`node --experimental-strip-types --test "test/*.test.ts"`；v0.5.3 起不再使用 `--test-force-exit`）：
    - #1 溯源矩阵（真实用户 / 插件注入 / prompt 回退 / **自回声（metadata 与纯文本两路）**）；
    - `verificationArgv` 平台分支；`runVerification` 用假 spawn（pass / fail / timeout / spawnUnavailable 降级）；
    - **门控**：无完成信号不触发验证；有信号才触发；
@@ -764,4 +821,4 @@ export type StopReason =
 - `verificationArgv` 仅覆盖 Windows PowerShell 与 POSIX `/bin/sh`。
 - 本机 V2 schema 无 `message.updated`/`session.error`；引擎对应分支为死路径，
   完成检测靠 idle→`maybeInject` 兜底（延迟而非漏判）。清理留作独立后续项。
-- `docs/features/engine.md:32` 关于 `resume:true` 的描述与实现不符，本阶段一并修正。
+- `docs/features/engine.md` 关于 `resume:true` 的描述与实现不符，本阶段一并修正。

@@ -6,14 +6,14 @@ OpenCode V2 插件：自动续跑「总任务未完成就被中断」的会话�
 
 ```text
 /autocontinue on      → toast 标题 "Autocontinue" / 正文 "Watch enabled (watching)"，footer 出现 [AC ●]
-/autocontinue status  → toast 标题 "Autocontinue" / 正文 "Watching · watching · 0 injection(s)"
+/autocontinue status  → toast 标题 "Autocontinue" / 正文 "Watching · watching · 0 injections"
 /autocontinue off     → toast 标题 "Autocontinue" / 正文 "Watch disabled"，footer 指示消失，侧栏块隐藏
 
 footer:  [AC ●] watching | [AC ✓] done | [AC ⏸] paused | [AC ⏹ N] stopped | [AC ⏹ N · watch timeout] stopped（带停止原因）
 sidebar: ⏱ 3m 22s / 🔄 5 injections (2 this round) / 🎯 watching
 ```
 
-停止后 `status` 会多带一段原因：`Watching · stopped · 5 injection(s) · watch timeout`。
+停止后 `status` 会多带一段原因：`Watching · stopped · 5 injections · watch timeout`。
 
 ## 关键特性
 
@@ -24,17 +24,6 @@ sidebar: ⏱ 3m 22s / 🔄 5 injections (2 this round) / 🎯 watching
 - **默认续跑消息**：「继续执行。按既定计划推进；遇到问题先自查修复，勿中断整体任务。」（模板支持 `{time}` `{remaining}` 自定义）
 - **每会话 `/autocontinue` 开关**：值守状态按会话持久化，随时查看状态
 - **零侵入**：不值守的会话完全不受影响；只读事件 + 注入 prompt，不改会话、不删消息
-
-## v0.5.2 起的行为变更
-
-如果你从旧版本升级，以下默认值的改动会影响你的值守时长，升级前请看一眼：
-
-- **墙钟上限有了默认值**：`watchTimeoutMs` 默认由 `0`（无限）改为 `86400000`（24 小时）。想继续无限值守，显式写 `"watchTimeoutMs": 0`。
-- **验证轮次上限有了默认值**：`verifyMaxIterations` 默认由 `0`（无限）改为 `50`。同上，显式写 `0` 仍表示无限。
-- **停止原因可观测**：停止时 footer 与 `status` 会显示原因短语。v0.5.2 引入 7 种，v0.5.3 增至 8 种（新增 `title excluded`）：`window closed` / `watch timeout` / `injection cap` / `verify limit` / `interrupted while idle` / `stopped by user` / `abort sentinel` / `title excluded`。
-- **挫败感触发**（opt-in，默认关闭）：配置 `frustrationTriggers` 后，命中时把 `frustrationMessage` 提醒句追加到**下一次**注入末尾；`frustrationTriggers` 默认为空数组，等于关闭。
-
-v0.5.3 起，墙钟预算**按轮次计量**：真实用户消息开启新一轮时，24 小时预算重新计算，不再从首次值守起一直累加。
 
 ## 工作机制
 
@@ -51,15 +40,28 @@ v0.5.3 起，墙钟预算**按轮次计量**：真实用户消息开启新一轮
 
 ## 快速开始
 
-前置要求：OpenCode ≥ V2、`opencode` CLI 在 PATH 中、能访问 GitHub、插件按用户全局安装。
+前置：OpenCode ≥ V2，`opencode` CLI 已安装并已登录。
 
 ```sh
 opencode plugin add github:dubuqiangu/opencode-autocontinue
 ```
 
-装完只剩一步：**重启 opencode**（`opencode service restart` 或退出重开；重启会打断当前会话，需你点头同意才执行）。
+装完**完整重启 opencode**（`opencode service restart` 或退出重开；`/reload` 不重载插件），再在会话内执行 `/autocontinue on`——footer 出现 `[AC ●]` 即已生效。
 
-然后任意会话 `/autocontinue on` 即开启值守。
+完整步骤（前置要求 / 验证清单 / 更新 / 卸载）见 [安装指南](docs/guides/install.md)。
+
+## v0.5.3 起的行为变更
+
+如果你从旧版本升级，以下默认值的改动会影响你的值守时长，升级前请看一眼：
+
+- **墙钟上限有了默认值**（v0.5.2 引入）：`watchTimeoutMs` 默认由 `0`（无限）改为 `86400000`（24 小时）。想继续无限值守，显式写 `"watchTimeoutMs": 0`。
+- **验证轮次上限有了默认值**（v0.5.2 引入）：`verifyMaxIterations` 默认由 `0`（无限）改为 `50`。同上，显式写 `0` 仍表示无限。
+- **停止原因可观测**：停止时 footer 与 `status` 会显示原因短语。v0.5.2 引入 7 种，v0.5.3 增至 8 种（新增 `title excluded`）：`window closed` / `watch timeout` / `injection cap` / `verify limit` / `interrupted while idle` / `stopped by user` / `abort sentinel` / `title excluded`。
+- **挫败感触发**（v0.5.2 引入，opt-in，默认关闭）：配置 `frustrationTriggers` 后，命中时把 `frustrationMessage` 提醒句追加到**下一次**注入末尾；`frustrationTriggers` 默认为空数组，等于关闭。
+
+v0.5.3 起，墙钟预算**按轮次计量**：真实用户消息开启新一轮时，24 小时预算重新计算，不再从首次值守起一直累加。
+
+完整版本变更见 [变更记录](docs/decisions/changelog.md)。
 
 ## 更新 / 卸载
 

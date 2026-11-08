@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | D1 | 注入通道优先级 | 优先 `session.synthetic`（落库 `type:"synthetic"`），失败回退 `session.prompt` + `metadata`；两路都带 `metadata.origin` | 只用 `session.prompt` 纯文本——注入回流被当真实用户消息，`maxConsecutive` 停止保障失效 | loop-evidence §0、§2；loop-mechanisms §1 |
 | D2 | 注入来源判定 | 三层 metadata 兜底读取（`item.payload.metadata` → `item.metadata` → `info.metadata`）+ `isPluginInjection` 守卫 | 只读 `item.metadata`——本机 schema 实为 payload 嵌套，读不到就退化成「无来源信息」 | loop-evidence §2.2；loop-mechanisms §1.2 |
-| D3 | 自回声兜底 | 引擎记录 `lastSelfInjection`，时间窗内文本逐字相等即判回声，不触发 `resume()` | 完全依赖宿主回流 `metadata`/`synthetic`（两项都属未证实假设） | loop-evidence §2.3；loop-mechanisms §2 |
+| D3 | 自回声兜底 | 引擎记录 `lastSelfInjection`，窗口内**文本逐字相等**即判回声（不触发 `resume()`）；**无文本**时按 `selfEchoWindowMs` 时间窗兜底；文本**不同**时绝不误吞 | 完全依赖宿主回流 `metadata`/`synthetic`（两项都属未证实假设） | loop-evidence §2.3；loop-mechanisms §2 |
 | D4 | 验证驱动 Loop 的门控语义 | 仅当检测到完成信号才跑验证命令；完成**只**认独立命令的 exit code | 无信号也验证——干净树上的 `npm test` 会立刻误判 done；只认模型自报——模型自报即信 | loop-evidence §3.1、§3.4；loop-mechanisms §3.1、§3.4 |
 | D5 | 失败上限的判定顺序 | verify-then-cap：先验证，通过即 done，失败才判上限 | cap 前置——与原折中自相矛盾，且所谓「省一次子进程」在数学上并不成立 | loop-evidence §3.6；loop-mechanisms §3.4 |
 | D6 | 验证安全 | 输出按**不可信数据**处理：声明行 + 控制字符清洗 + 8KB 头尾截断；哨兵与完成标记检测**绝不**扫描验证输出 | 把命令输出直接拼进 prompt——验证输出可自我终止循环 | loop-evidence §3.7；loop-mechanisms §3.6 |
@@ -38,16 +38,16 @@
 | D13 | 工具失败观测计数器 | opt-in（`observeToolFailures` 默认 `false`），去重 + 成功清零，**只观测不参与任何完成/停止判定** | 默认开启；把它当作任务失败数 | loop-evidence §7.5；loop-mechanisms §6 |
 | D14 | 挫败感触发 | 缩减后借鉴 + opt-in（`frustrationTriggers` 默认 `[]`）：命中真实用户消息后装饰**下一次**注入 | 原样移植——上游挂在同一轮，我方只有「新开一轮」的通道；默认开启——误判会把一句斥责塞进正常轮次 | loop-evidence §9.2、§9.4；loop-mechanisms §5 |
 | D15 | 无人值守护栏 | 默认上界 `watchTimeoutMs = 24h`、`verifyMaxIterations = 50`；`0` 仍表示无限，用户可显式写 0 恢复 | 默认全 0——无人值时没有任何上界 | loop-evidence §9.5；loop-mechanisms §6.1 |
-| D16 | 停止原因可观测 | `stopReason` 七值贯通持久化 → `markStopped` → 引擎各停止点 → RPC schema → footer / toast 短语 | 只发 `state:"stopped"`——用户无法区分护栏停止、窗口到点、用户中止与模型 abort 哨兵 | loop-evidence §9.5；loop-mechanisms §6.2 |
+| D16 | 停止原因可观测 | `stopReason` **八值**贯通持久化 → `markStopped` → 引擎各停止点 → RPC schema → footer / toast 短语 | 只发 `state:"stopped"`——用户无法区分护栏停止、窗口到点、用户中止与模型 abort 哨兵 | loop-evidence §9.5；loop-mechanisms §6.2 |
 | D17 | 标题排除的停止原因 | v0.5.3 补第 8 个取值 `title-excluded`（footer 短语 `title excluded`） | 无参 `markStopped(sessionID)`——会清空既有原因，footer 只剩裸 `[AC ⏹ N]` | loop-mechanisms §9.3 |
 | D18 | 停止原因的单一真源 | v0.5.3：`STOP_REASONS` 唯一定义在 `src/rpc.ts`，两处 schema enum 与 `RpcContract` 联合类型全部派生；`src/state.ts` 导入并再导出；TUI 标签表保持字面量形态、由测试守卫 | 四份手写副本——漏改 rpc enum 会让宿主拒绝该会话**所有** `state.changed` 事件，静默丢失全部状态更新 | loop-mechanisms §9.4 |
-| D19 | 跨午夜窗口 | `computeEndAt` 跨日滚动 + `startGateClosed` 跨午夜感知（次日 00:00–`startTime` 属窗口尾段，仍算开） | 朴素的 `startTime` 比较——跨午夜窗口在次日清晨被误判「未到点」而不注入 | loop-evidence §8.1、§8.2；loop-mechanisms §7 |
+| D19 | 跨午夜窗口 | `computeEndAt` 跨日滚动 + `startGateClosed` 跨午夜感知（次日 00:00–`startTime` 属窗口尾段，仍算开）。**已实现，尚未实机验证** | 朴素的 `startTime` 比较——跨午夜窗口在次日清晨被误判「未到点」而不注入 | loop-evidence §8.1、§8.2；loop-mechanisms §7 |
 | D20 | 墙钟预算的计量口径 | v0.5.3：按**轮次**计量（新增持久字段 `roundSince`，`watch()` 置位、`resume()` 刷新、`hydrate()` 回落为 `since`） | 按 `since` 累计——新一轮继承上一轮的剩余预算，第 2 轮起几乎立刻超时 | loop-mechanisms §9.2 |
 | D21 | 注入上限的配置语义 | v0.5.3：`maxConsecutive` 负值回退基础值（默认 20），`0` 仍表示不限，非有限值回退默认 | 负值静默取消唯一的注入上限——与 v0.5.2 守护栏的意图直接冲突 | loop-mechanisms §9.1 |
 | D22 | DSH 风格（风味）机制 | 整体**不移植**（风味/人设/方法论预设/角色层级/i18n/降压换框/钉味提醒库/feedback） | 逐项借鉴——多数依赖我方 `ServerContext` 没有的宿主 API；且部分与「零模型成本」冲突 | loop-evidence §9.2 |
 | D23 | V2 死路径清理 | **不做**：保留 `message.updated` / `session.error` / `info.role` 分支 | 删掉死路径——会破坏 5 处锁定用例并回退 0.3.11 已记录的兼容决策，收益仅「少几行」 | loop-evidence §7.6 |
 | D24 | 测试退出方式 | v0.5.3：测试必须自行退出，`npm test` = `node --experimental-strip-types --test "test/*.test.ts"` | 依赖 `--test-force-exit`——掩盖 `makeEngine()` 从不 `dispose()` 造成的 15 个残留定时器 | loop-mechanisms §9.5 |
-| D25 | 全局配置路径的可注入性 | v0.5.4 起 `loadConfig` 支持可选的全局配置路径注入（`LoadConfigOptions`），测试不再改写进程级环境变量 | 靠改 `USERPROFILE` / `HOME` 隔离——进程级全局状态，同进程并行跑测试会互相污染 | loop-mechanisms §10 |
+| D25 | 全局配置路径的可注入性 | v0.5.4 起 `loadConfig` 支持可选的全局配置路径注入（`LoadConfigOptions`）。**已实现**：测试经由 `setup()` / `loadConfig()` 的注入参数指向临时目录，不再改写 `USERPROFILE` / `HOME` 这类进程级环境变量 | 靠改 `USERPROFILE` / `HOME` 隔离——进程级全局状态，同进程并行跑测试会互相污染 | loop-mechanisms §10 |
 
 ---
 
@@ -64,11 +64,25 @@
 
 但 `metadata` 是否回流到引擎稍后读到的消息、`synthetic` 的 `resume` 语义是否如预期，
 都属未证实的宿主行为假设。故引擎记录**自己何时注入过**（`lastSelfInjection`），
-在 `selfEchoWindowMs`（默认 10s）内且入站文本与记录**逐字相等**时判为自回声——
-**引擎本来就知道自己何时注入过**，这是不依赖宿主行为的保底判定。
+按**三条规则**判回声（`src/engine.ts` 的 `isSelfEcho`）：
 
-已知限制（保留在案）：真实用户在注入后 10s 内发出逐字相同的消息会被误判为回声；
-提取不到文本时只凭时间窗判定，更宽松。
+1. **文本相同判回声**——入站文本可提取，且与记录文本**逐字相等**；
+2. **文本不同绝不误吞**——入站文本可提取但与记录文本**不同** → 一定**不是**回声，
+   按真实用户消息处理（走 `resume()`、挫败感检测等真实用户路径）；
+3. **无文本按时间窗兜底**——入站文本提取不到（缺失或空串），且
+   `Date.now() - lastSelfInjection.at <= selfEchoWindowMs`（默认 10s）→ 判为回声。
+
+**引擎本来就知道自己何时注入过**，这是不依赖宿主行为的保底判定。v0.5.5 起注入记录在
+**整个 `selfEchoWindowMs` 窗口内保持有效**（不在首次命中时清除），宿主把同一条注入
+以两种事件形状各投递一次时，第二次仍被判为回声——不会触发 `resume()` 清零三重上界。
+
+已知限制（保留在案）：
+
+- 真实用户在注入后 10s 内发出逐字相同的消息会被误判为回声（概率可忽略）；
+- **时间窗兜底的残留风险**：真实用户消息若落在窗口内、且宿主**不提供可提取文本**，
+  会被第 3 条规则判为回声而**未被处理**（既不 `resume()`，也不进入真实用户路径）。
+  引擎侧无法进一步收窄——没有文本就没有可比对的依据；调小 `selfEchoWindowMs` 可降低触发概率。
+  已记入 `docs/decisions/known-issues.md`，本版不修。
 
 ### 2.2 验证驱动 Loop 与其安全边界（D4–D7）
 
@@ -124,7 +138,8 @@ v0.5.2 给无人值场景装了两道上界：`watchTimeoutMs` 24h 覆盖跨午�
 且不误杀长任务；`verifyMaxIterations` 50 在默认 `maxConsecutive: 20` 之上留出余量，
 同时在用户把 `maxConsecutive` 设为 `0`（无限）时仍有一道护栏。`0 = 无限` 的语义保留。
 
-停止原因从「只有 `state:"stopped"`」升级为七值枚举，贯通持久化字段 → `markStopped` →
+停止原因从「只有 `state:"stopped"`」升级为枚举，v0.5.2 首批 **7 值**、
+v0.5.3 补第 8 值 `title-excluded`，合计 **8 值**，贯通持久化字段 → `markStopped` →
 引擎各停止点 → RPC schema → TUI footer 与 `/autocontinue status` toast。
 **护栏停止一律是 `stopped`，绝不是 `done`。** 侧栏保持既有契约：终态不渲染侧栏。
 
@@ -133,6 +148,8 @@ v0.5.2 给无人值场景装了两道上界：`watchTimeoutMs` 24h 覆盖跨午�
 跨午夜窗口的起点闸必须跨午夜感知：`startTime` 22:00 / `endTime` 08:30 的窗口，
 在次日 00:00–22:00 之间**仍是开着的**——朴素的 `now < startTime` 比较会在整个夜半段
 误判「未到点」而不注入。
+**该语义已实现，但尚未实机验证**（跨午夜的实机验证仍是待办，见
+`docs/decisions/known-issues.md`）。
 
 墙钟预算则按**轮次**计量：新一轮不继承上一轮的剩余预算。这是**修正而非收紧**，
 等于把「一次性总额」还原成「每轮额度」；`since` 保留「本次值守开始时间」的语义，

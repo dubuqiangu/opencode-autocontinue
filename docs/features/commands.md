@@ -22,7 +22,7 @@ TUI keymap slash 命令（/autocontinue on）
 
 - `on`：watch(sessionID)，写入 storage，计数归零；toast「Watch enabled (watching)」（标题 `Autocontinue`）
 - `off`：unwatch(sessionID)，删除 storage 记录；toast「Watch disabled」
-- `status`：直接调 RPC 读当前会话状态（非经过期信号），`Watching · <state> · N injection(s)` / `Not watching`；**stopped 轮追加 ` · <phrase>`**（停止原因短语，见 [footer.md](footer.md)）
+- `status`：直接调 RPC 读当前会话状态（非经过期信号），`Watching · <state> · N injections`（计数为 1 时显示 `1 injection`）/ `Not watching`；**stopped 轮追加 ` · <phrase>`**（停止原因短语，见 [footer.md](footer.md)）。这里的 N 是**本轮**注入数，与侧栏 `🔄` 的生命周期累计口径不同（详见 [footer.md](footer.md)）
 
 ## RPC 契约
 

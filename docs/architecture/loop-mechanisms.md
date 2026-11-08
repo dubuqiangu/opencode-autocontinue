@@ -1,7 +1,7 @@
-# 续跑机制规格（现行行为与 v0.5.3 修复规格）
+# 续跑机制规格（现行行为与历史修复规格）
 
 本文是 opencode-autocontinue **现行实现**的准确规格：每个判定环节的输入、判据、产出与落点，
-以及 v0.5.3 的修复规格（后续实现的唯一依据）。
+以及各版本修复规格的归档（每条注明「已发布」与「历史（已归档）」）。
 
 配套文档：
 
@@ -9,8 +9,8 @@
 - [loop-evidence.md](loop-evidence.md)——取证与历史轮次（机制来源、上游比对、逐版本落地记录）。
 - [events-and-state.md](events-and-state.md)——事件词汇、持久化字段与状态机图。
 
-本文描述的是**代码当前真实在做的事**，不描述设想。§9 记录 v0.5.3 的修复规格与验收口径，
-是本轮实现的直接依据。§10 记录 v0.5.4 的内部增量（不改变任何运行时行为）。
+本文描述的是**代码当前真实在做的事**，不描述设想。§9 归档 v0.5.3 的修复规格与验收口径
+（各条**已发布**，逐条给出当前行为），§10 记录 v0.5.4 的内部增量，§11 记录 v0.5.5 的增量。
 
 ## 目录
 
@@ -24,6 +24,7 @@
 - [§8 停止路径总表](#8-停止路径总表)
 - [§9 v0.5.3 修复规格](#9-v053-修复规格)
 - [§10 v0.5.4 增量](#10-v054-增量)
+- [§11 v0.5.5 增量](#11-v055-增量)
 
 ---
 
@@ -52,7 +53,7 @@ export const PROVENANCE_METADATA: Record<string, unknown> = {
 export function isPluginInjection(metadata: unknown): boolean
 ```
 
-`injectContinuation`（`src/prompt.ts:59`）的通道优先级：
+注入函数 `injectContinuation`（`src/prompt.ts`）的通道优先级：
 
 1. 宿主提供 `session.synthetic` 时，用 `session.synthetic({ sessionID, text, description, metadata, resume: true })`
    —— 落库为 `type:"synthetic"`，与真实用户消息结构上可区分；
@@ -80,21 +81,30 @@ export function isPluginInjection(metadata: unknown): boolean
 `metadata` / `synthetic` 是否真的回流到引擎稍后读到的消息，无法保证。故引擎记录**自己何时注入过**，
 用「自回声」作 host-agnostic 保底判定。
 
-- `InMemoryState.lastSelfInjection?: { text: string; at: number }`（`src/state.ts:56`）。
-- `injectAndRecord`（`src/engine.ts:317`）在 `injectContinuation` 成功后立即记录
+- `InMemoryState.lastSelfInjection?: { text: string; at: number }`（`src/state.ts` 的 `InMemoryState`）。
+- `injectAndRecord`（`src/engine.ts` 的注入漏斗）在 `injectContinuation` 成功后立即记录
   `{ text: 实际发送的完整文本, at: Date.now() }`。
-- 判定顺序：`isPluginInjection(metadata)` → 回声 → 真实用户。回声判定条件为
-  `Date.now() - lastSelfInjection.at <= selfEchoWindowMs`（默认 10s，`src/config.ts:122`）
-  **且**入站文本与记录文本**逐字相等**。
+- 判定顺序：`isPluginInjection(metadata)` → 回声 → 真实用户。
+- 回声判定（`src/engine.ts` 的 `isSelfEcho`）共**三条规则**：
+  1. **文本相同判回声**——入站文本**可提取**，且与记录文本**逐字相等**。
+  2. **文本不同绝不误吞**——入站文本**可提取**但与记录文本**不同** → **一定不是**回声，
+     按真实用户消息处理（走 `resume()`、挫败感检测等真实用户路径）。
+  3. **无文本按时间窗兜底**——入站文本**提取不到**（缺失或空串），且
+     `Date.now() - lastSelfInjection.at <= selfEchoWindowMs`（默认 10s，`src/config.ts` 的
+     `selfEchoWindowMs`）→ 判为回声。
 - 文本提取：V2 inbox 分支取 `item.payload.text`；V1 info 分支拼接文本 part。
-  提取不到文本时**只凭时间窗**判定（此时属于较弱的一路）。
-- 命中回声：清除 `lastSelfInjection`，跳过 `resume()` 与 `lastUserMessageAt`，等同
-  `metadata` 路径处理。
+- 命中回声：跳过 `resume()` 与 `lastUserMessageAt`，等同 `metadata` 路径处理。
+- **回声幂等（v0.5.5）**：注入记录在**整个 `selfEchoWindowMs` 窗口内保持有效**，不在首次命中时清除。
+  宿主可能把同一条注入以**两种事件形状**各投递一次（例如 `message.updated` 与
+  `session.inbox.enqueued`），第二次投递同样被判为回声——不触发 `resume()`，也不清零
+  **注入上限 / 验证失败计数 / 轮次墙钟**三重上界。
 
 ### 2.1 已知限制
 
-真实用户在注入后 10s 内发出**逐字相同**的消息会被误判为回声——概率可忽略。
-提取不到文本时的时间窗兜底更宽松，同理记为已知限制。
+- 真实用户在注入后 10s 内发出**逐字相同**的消息会被误判为回声——概率可忽略。
+- **时间窗兜底的残留风险**：真实用户消息若落在 `selfEchoWindowMs` 窗口内、且宿主**不提供
+  可提取文本**，会被第 3 条规则判为回声而**未被处理**（既不 `resume()`，也不进入真实用户路径）。
+  引擎侧无法进一步收窄——没有文本就没有可比对的依据；调小 `selfEchoWindowMs` 可降低触发概率。
 
 ---
 
@@ -165,16 +175,16 @@ verify 模式下完成信号只用于「触发验证」，不再用于「判定�
 `escalationMessages`（整条替换两档）已于 v0.5.0 删除（breaking）。现行形态是
 「基础 `message` + 压力梯 + 阈值追加」：
 
-- `selectPressureMessage(ladder, rejections)`（`src/engine.ts:157`）：分档
+- `selectPressureMessage(ladder, rejections)`（`src/engine.ts`）：分档
   `<=3 / <=7 / <=15 / <=30 / <=50 / else`，梯子更短时钳到最后一行，空数组返回 `""`。
-- `composeRejectionPrompt(cfg, rejections)`（`src/engine.ts:177`）：
+- `composeRejectionPrompt(pluginConfig, rejections)`（`src/engine.ts`）：
 
   ```ts
-  const lines = [cfg.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
-  const pressure = selectPressureMessage(cfg.escalationPressureLadder, rejections)
+  const lines = [pluginConfig.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
+  const pressure = selectPressureMessage(pluginConfig.escalationPressureLadder, rejections)
   if (pressure) lines.push(pressure)
-  if (rejections >= 3 && cfg.escalationReassessMessage) lines.push(cfg.escalationReassessMessage)
-  if (rejections >= 5 && cfg.escalationRootCauseMessage) lines.push(cfg.escalationRootCauseMessage)
+  if (rejections >= 3 && pluginConfig.escalationReassessMessage) lines.push(pluginConfig.escalationReassessMessage)
+  if (rejections >= 5 && pluginConfig.escalationRootCauseMessage) lines.push(pluginConfig.escalationRootCauseMessage)
   return lines.join("\n")
   ```
 
@@ -198,7 +208,7 @@ verify 模式下完成信号只用于「触发验证」，不再用于「判定�
 | `abortSentinelTag` | `"loop-abort"` | 成对标签名；空串禁用 |
 | `pauseSentinelTag` | `"loop-pause"` | 成对标签名；空串禁用 |
 
-`matchSentinel(text, tag)`（`src/events.ts:99`）对 tag 做正则转义后构造
+`matchSentinel(text, tag)`（`src/events.ts`）对 tag 做正则转义后构造
 `<tag>([\s\S]+?)</tag>`：必须**成对**、夹注**非空**、**大小写敏感**（无 `i` 标志）；
 空 tag 返回 `undefined`。
 
@@ -216,7 +226,7 @@ abort 在后台守卫**之前**、pause 在守卫**之后**：显式放弃必须
 
 ### 4.3 paused 状态
 
-- `WatchState["state"]` 联合含 `"paused"`（`src/rpc.ts:144`）。
+- `WatchState["state"]` 联合含 `"paused"`（`src/rpc.ts`）。
 - `markPaused(sessionID)` 把 state 置 `paused` 并持久化。
 - `hydrate()` 保留 `paused`（等待用户输入的**活动**值守），丢弃终态 `done` / `stopped`。
 - 真实用户消息经 `store.resume()` 把 state 翻回 `watching`，并由引擎重新 `scheduleInterval`，
@@ -246,7 +256,7 @@ frustrationMessage: string
 
 - 位置：真实用户消息分支内、**自回声守卫之后**——插件自己的注入回流永远不会触发。
 - 文本来源：V2 `item.payload.text`；V1 `messageText(info.parts)`。
-- 匹配：`matchesFrustration`（`src/engine.ts:189`）做**大小写不敏感的子串匹配**，
+- 匹配：`matchesFrustration`（`src/engine.ts`）做**大小写不敏感的子串匹配**，
   不使用正则、不搬运上游的过泛词表；命中任一子串即算命中。
 
 ### 5.3 副作用
@@ -274,6 +284,8 @@ frustrationMessage: string
 
 ### 6.2 停止原因
 
+`StopReason` 共 **8 值**，**单一真源**在 `src/rpc.ts` 的 `STOP_REASONS`：
+
 ```ts
 export type StopReason =
   | "window-closed"
@@ -283,31 +295,36 @@ export type StopReason =
   | "idle-interrupted"
   | "user-interrupted"
   | "abort-sentinel"
+  | "title-excluded"
 ```
 
-- `WatchState.stopReason?: StopReason` 是**持久化字段**（`src/rpc.ts:146`）。
+- `WatchState.stopReason?: StopReason` 是**持久化字段**（`src/rpc.ts` 的 `WatchState`）。
 - `WatchStore.markStopped(sessionID, reason?: StopReason)`：传 reason 则写入，
   **不传 reason 则清空**既有 reason（该无参语义已被单测锁定）。
 - `markDone` 与 `resume` 都会把 `stopReason` 置 `undefined`——上一轮的原因不得泄漏到新一轮状态。
 - `hydrate()` 只在 `isStopReason(entry.stopReason)` 为真时保留该字段。
 - RPC：`WatchStatus`、`WatchStatusEvent` 与 `state.changed` 的 schema 都声明 `stopReason`
-  （schema 用 `enum` 显式列出全部取值；schema 是 `additionalProperties:false`，
+  （schema 的 `enum` 由 `STOP_REASONS` 派生；schema 是 `additionalProperties:false`，
   **不显式声明就会被整条丢弃**）。
 - TUI：footer 显示 `[AC ⏹ N · 短语]`，`/autocontinue status` 的 toast 同样显示原因文案。
   侧栏块**保持既有契约**——终态（`done` / `stopped`）不渲染侧栏。
+- 英文短语表在 `src/tui-logic.ts` 的 `STOP_REASON_LABELS`（v0.5.5 起从 `src/tui.tsx` 抽出的
+  纯逻辑模块），其键集合与 `STOP_REASONS` 的一致性由测试守卫。
 
 ### 6.3 墙钟预算的现行计量
 
-`watchTimeoutMs` 当前按 `WatchState.since` 计量。`since` 在 `watch()` 时写入
-（`src/state.ts:173`），`resume()` **不改动** `since`——因此现行语义是
-「从本次 `/autocontinue on` 起累计」，而不是按轮次。§9.2 将其改为按轮次计量。
+`watchTimeoutMs` **按轮次计量**（v0.5.3 起）。`WatchState` 同时存两个时间锚点：
 
-两处墙钟判定点：
+- `since`——本次 `/autocontinue on` 的开始时间，`resume()` **不改动**它，供侧栏 ⏱ 时长显示；
+- `roundSince`——**本轮**的开始时间，`watch()` 时与 `since` 同时置位，真实用户消息开启新一轮时刷新。
 
-- `src/engine.ts:480`——注入前的超时判定；
-- `src/engine.ts:421`——验证命令返回后的 staleness 复检。
+墙钟判定一律读 `roundSince`：
 
-两处都读 `entry.since`，改按轮次计量后须一并改读 `roundSince`（§9.2）。
+- `src/engine.ts` 的 `maybeInject`——注入前的超时判定；
+- `src/engine.ts` 的 `runVerifyGate`——验证命令返回后的 staleness 复检。
+
+`hydrate()` 遇到旧数据缺 `roundSince` 时**回落为 `since`**（旧记录没有轮次概念，
+首次恢复时按值守起点算，避免一恢复就判定超时）。`watchTimeoutMs: 0` 仍表示**无限**。
 
 ---
 
@@ -324,7 +341,7 @@ export type StopReason =
    （**保留**注入计数），等下一次触发重新判定。
 4. `finalCheckEnabled: false` 时，命中标记即 `markDone()`，不走两阶段。
 
-完成标记的来源：`buildCompletionMatcher(config)`（`src/config.ts:339`）——
+完成标记的来源：`buildCompletionMatcher(config)`（`src/config.ts`）——
 `markerRegex` 有效时取代 `completionMarkers`；两者都为空时返回 `null` matcher，
 即**不检测完成**，会话持续值守。
 
@@ -341,35 +358,45 @@ verify 模式下 §7.1 的两阶段流程**整段被替换**：完成信号只�
 
 ## 8. 停止路径总表
 
-| 停止原因 | 触发点 | 源码位置 | 状态 |
+共 **8 条**带原因的停止路径，全部记为 `stopped`：
+
+| 停止原因 | 触发点 | 落点（符号） | 状态 |
 |---|---|---|---|
-| `window-closed` | `endAt` 到点 | `src/engine.ts:472` | `stopped` |
-| `watch-timeout` | 墙钟预算耗尽 | `src/engine.ts:481` | `stopped` |
-| `injection-cap` | `injections >= maxConsecutive` | `src/engine.ts:490` | `stopped` |
-| `verify-limit` | `rejections >= verifyMaxIterations` | `src/engine.ts:436` | `stopped` |
-| `idle-interrupted` | V1 `session.idle` 且 `outcome="interrupted"` | `src/engine.ts:845` | `stopped` |
-| `user-interrupted` | V2 `session.execution.interrupted` | `src/engine.ts:864` | `stopped` |
-| `abort-sentinel` | assistant 文本命中 abort 哨兵 | `src/engine.ts:547` | `stopped` |
-| （无原因） | 会话标题命中 `excludeTitleKeywords` | `src/engine.ts:506` | `stopped` |
+| `window-closed` | `endAt` 到点 | `src/engine.ts` 的 `maybeInject`（窗口判定分支） | `stopped` |
+| `watch-timeout` | 墙钟预算耗尽 | `src/engine.ts` 的 `maybeInject`（墙钟判定分支） | `stopped` |
+| `injection-cap` | `injections >= maxConsecutive` | `src/engine.ts` 的 `maybeInject`（注入上限分支） | `stopped` |
+| `verify-limit` | `rejections >= verifyMaxIterations` | `src/engine.ts` 的 `runVerifyGate`（verify-then-cap 分支） | `stopped` |
+| `idle-interrupted` | V1 `session.idle` 且 `outcome="interrupted"` | `src/engine.ts` 的 V1 `session.idle` 事件分支 | `stopped` |
+| `user-interrupted` | V2 `session.execution.interrupted` | `src/engine.ts` 的 V2 中断事件分支 | `stopped` |
+| `abort-sentinel` | assistant 文本命中 abort 哨兵 | `src/engine.ts` 的 `maybeInject`（abort 哨兵分支） | `stopped` |
+| `title-excluded` | 会话标题命中 `excludeTitleKeywords` | `src/engine.ts` 的 `maybeInject`（标题排除分支） | `stopped` |
 
 补充说明：
 
 - **用户主动 `/autocontinue off`** 不是一条停止路径——它直接移除值守记录，不产生 `stopped` 状态。
 - **pause 哨兵**不是停止——它把状态置为 `paused`，等待用户输入后经 `resume()` 恢复。
-- 标题排除路径当前调用 `markStopped(sessionID)`（无参），会**清空**既有 `stopReason`，
-  footer 只能显示裸 `[AC ⏹ N]`，用户无法区分「被标题排除」与其它停止——§9.3 修正。
+- 标题排除路径自 v0.5.3 起记为 `title-excluded`（此前调用无参 `markStopped(sessionID)`，
+  会**清空**既有 `stopReason`，footer 只能显示裸 `[AC ⏹ N]`）。
+- **忙 / 活跃状态没有 `session.status` 轮询**：是否在跑由**事件派生**（`lastBusyAt` /
+  `lastActiveAt`），判定为忙或仍在活动时直接跳过本轮注入，不做轮询等待。
 
 ---
 
 ## 9. v0.5.3 修复规格
 
-> 本节是 v0.5.3 实现的**唯一依据**。逐条写明已裁定的语义、实现契约与验收要求。
-> 全部条目状态为「待实现」。
+> 本节归档 v0.5.3 的修复规格与验收口径。逐条写明已裁定的语义、实现契约与验收要求。
+> 各条状态见各小节开头的「状态」标注：**✅ 已发布**的条目给出**当前行为**；
+> 「问题 / 裁定 / 实现契约」的叙述是**当时的历史快照（历史（已归档））**，保留在案以免被误读为待办。
 
 ### 9.1 配置钳制：`maxConsecutive` 负值回退
 
+> **状态：✅ 已发布（v0.5.3）。**
+> **当前行为**：`mergeConfig` 的 `maxConsecutive` 分支对**负值回退到基础值**（默认 `20`），
+> `0` 仍表示**不限**，非有限值（`NaN` / `Infinity` / `-Infinity` / `1e400`）回退默认，正数原样采用。
+> 基础值本身不可用时再回退到出厂默认 `20`。
+
 **问题**：`mergeConfig` 对 `maxConsecutive` 只做了有限性校验，**没有下界钳制**
-（`src/config.ts:229-231`）。负值会被原样写入，运行时判定是
+（`src/config.ts` 的 `mergeConfig`）。负值会被原样写入，运行时判定是
 `cfg.maxConsecutive > 0 && entry.injections >= cfg.maxConsecutive`——负数不满足 `> 0`，
 于是**唯一的注入次数上限被静默取消**，与 v0.5.2 守护栏的意图直接冲突。
 
@@ -399,6 +426,12 @@ verify 模式下 §7.1 的两阶段流程**整段被替换**：完成信号只�
 
 ### 9.2 墙钟预算按轮次计量
 
+> **状态：✅ 已发布（v0.5.3）。**
+> **当前行为**：`watchTimeoutMs` **按轮次计量**——`watch()` 同时置 `since` 与 `roundSince`；
+> 真实用户消息经 `resume()` 开启新一轮时**刷新 `roundSince`**、`since` **不变**；
+> `hydrate()` 遇到旧数据缺 `roundSince` 时**回落为 `since`**；引擎两处墙钟判定都读
+> `roundSince`；`watchTimeoutMs: 0` 仍表示**无限**。
+
 **问题**：`watchTimeoutMs`（默认 24h）当前从 `since` 起算，`since` 只在 `watch()` 时写入，
 `resume()` 不改动它。用户在一次值守中发过若干条真实消息后，**每一轮都只能吃到第一轮剩余的预算**，
 第 2 轮起几乎立刻超时。这与「无人值守护栏保护长任务」的初衷相反。
@@ -420,8 +453,9 @@ verify 模式下 §7.1 的两阶段流程**整段被替换**：完成信号只�
      : (typeof entry.since === "number" ? entry.since : now),
    ```
 5. 引擎两处墙钟判定改用 `roundSince`：
-   - `src/engine.ts:480`（注入前的超时判定）：`Date.now() - entry.roundSince >= cfg.watchTimeoutMs`；
-   - `src/engine.ts:421`（验证命令返回后的 staleness 复检）：
+   - `src/engine.ts` 的 `maybeInject`（注入前的超时判定）：
+     `Date.now() - entry.roundSince >= cfg.watchTimeoutMs`；
+   - `src/engine.ts` 的 `runVerifyGate`（验证命令返回后的 staleness 复检）：
      `Date.now() - after.roundSince >= cfg.watchTimeoutMs`。
 6. `watchTimeoutMs: 0` 仍表示**无限**（既有语义不变）。
 
@@ -437,14 +471,18 @@ verify 模式下 §7.1 的两阶段流程**整段被替换**：完成信号只�
 - 引擎：把 `roundSince` 调到足够久远的时刻 → 判定超时停止（`watch-timeout`）；
   把 `since` 调老但 `roundSince` 保持新鲜 → **不**停止。
 
-**文档同步（本轮不实施，留给实现轮）**：`docs/architecture/events-and-state.md` 的存储
-JSON 示例需补 `roundSince` 字段；`docs/features/config.md` 需说明 `watchTimeoutMs` 的
-计量单位是「单轮」。
+**文档同步（✅ 已完成）**：`docs/architecture/events-and-state.md` 的存储 JSON 示例已补
+`roundSince` 字段；`docs/features/config.md` 已说明 `watchTimeoutMs` 的计量单位是「单轮」。
 
 ### 9.3 第 8 个停止原因：`title-excluded`
 
+> **状态：✅ 已发布（v0.5.3）。**
+> **当前行为**：标题命中 `excludeTitleKeywords` 时，引擎调用
+> `markStopped(sessionID, "title-excluded")`；`StopReason` 取值集合为 **8 值**；
+> TUI 短语为 `title excluded`，footer 渲染为 `[AC ⏹ N · title excluded]`。
+
 **问题**：标题命中 `excludeTitleKeywords` 而停止时，引擎调用的是**无参**的
-`markStopped(sessionID)`（`src/engine.ts:506`）。按 `markStopped` 的既有语义，
+`markStopped(sessionID)`（`src/engine.ts` 的标题排除分支）。按 `markStopped` 的既有语义，
 无参调用会**清空**既有的 `stopReason`——于是 footer 只能显示裸 `[AC ⏹ N]`，
 用户无法区分「这个会话被标题规则排除了」与其它停止原因。
 
@@ -464,8 +502,8 @@ JSON 示例需补 `roundSince` 字段；`docs/features/config.md` 需说明 `wat
 1. `STOP_REASONS` 的**唯一定义**落在 `src/rpc.ts`（契约模块，server 与 TUI 双侧共享）：
    `src/rpc.ts` 追加 `"title-excluded"`（放在数组**末尾**，保持 §9.4 的单一真源顺序），
    `src/state.ts` 从 `./rpc.ts` 导入并再导出，保持既有引用路径可用。
-2. `src/engine.ts:506` 改为 `await this.store.markStopped(sessionID, "title-excluded")`。
-3. `src/tui.tsx` 的 `STOP_REASON_LABELS` 追加 `"title-excluded": "title excluded"`。
+2. `src/engine.ts` 的标题排除分支改为 `await this.store.markStopped(sessionID, "title-excluded")`。
+3. `src/tui-logic.ts` 的 `STOP_REASON_LABELS` 追加 `"title-excluded": "title excluded"`。
 4. RPC 的两处 schema enum 与 `RpcContract` 的联合类型同步追加该值（见 §9.4）。
 
 **验收**：
@@ -476,17 +514,23 @@ JSON 示例需补 `roundSince` 字段；`docs/features/config.md` 需说明 `wat
 
 ### 9.4 `stopReason` 单一真源
 
+> **状态：✅ 已发布（v0.5.3）。**
+> **当前行为**：`STOP_REASONS` 的唯一定义在 `src/rpc.ts`；`src/rpc.ts` 的两处 schema `enum`
+> 写作 `enum: [...STOP_REASONS]`；`src/state.ts` 从 `./rpc.ts` 导入并再导出
+> `STOP_REASONS` / `StopReason`；TUI 侧标签表 `STOP_REASON_LABELS` 保持字面量对象形态，
+> 由测试断言与 `STOP_REASONS` 的集合相等。
+
 **问题**：停止原因的取值集合目前有 **4 份手写副本**：
 
 | # | 位置 | 形态 |
 |---|---|---|
-| 1 | `src/state.ts:15-22` | `StopReason` 联合类型（类型层真源） |
-| 2 | `src/state.ts:24-32` | `STOP_REASONS` 数组（**私有** `const`，仅供 `isStopReason` 使用） |
-| 3 | `src/rpc.ts` | 两处 schema `enum`（`status` 输出 + `state.changed` 事件） |
-| 4 | `src/tui.tsx:81-89` | `STOP_REASON_LABELS` 标签表 |
+| 1 | `src/state.ts` 的 `StopReason` 联合类型 | 类型层真源 |
+| 2 | `src/state.ts` 的 `STOP_REASONS` 数组（**私有** `const`，仅供 `isStopReason` 使用） | 运行时真源 |
+| 3 | `src/rpc.ts` 的两处 schema `enum`（`status` 输出 + `state.changed` 事件） | 契约层副本 |
+| 4 | `src/tui-logic.ts` 的 `STOP_REASON_LABELS` 标签表 | 展示层副本 |
 
 其中 `src/rpc.ts` 内还有第三份字面量：`RpcContract.events["state.changed"].schema.properties.stopReason`
-的联合类型（`src/rpc.ts:210-218`），它与同文件的两处运行时 `enum` 也是互相独立的副本。
+的联合类型，它与同文件的两处运行时 `enum` 也是互相独立的副本。
 
 **漂移代价**：RPC schema 是 `additionalProperties:false` + 显式 `enum`。若新增了
 `title-excluded` 却漏改 `state.changed` 的 schema `enum`，宿主会**拒绝该会话的所有
@@ -519,8 +563,9 @@ JSON 示例需补 `roundSince` 字段；`docs/features/config.md` 需说明 `wat
 3. `src/state.ts` 从 `./rpc.ts` 导入 `STOP_REASONS` 与 `StopReason` 并**再导出**
    （`export { STOP_REASONS }` + `export type { StopReason }`），保持既有引用路径可用；
    `isStopReason` 仍留在 `src/state.ts`，改用导入的 `STOP_REASONS`。
-4. `src/tui.tsx` 的 `STOP_REASON_LABELS` **保持字面量对象形态**，不在运行时派生，
-   一致性改由**测试守卫**保证。
+4. TUI 侧的 `STOP_REASON_LABELS` **保持字面量对象形态**，不在运行时派生，
+   一致性改由**测试守卫**保证。该表当前落在 `src/tui-logic.ts`（v0.5.5 从
+   `src/tui.tsx` 抽出，见 §11.5），`src/tui.tsx` 只做再导出。
 5. 最低要求：若实施中确因其它原因无法直接派生，则**至少由测试断言三者与 `STOP_REASONS`
    完全一致**（集合相等 + 顺序相等），任何漂移立即失败。
 
@@ -536,11 +581,12 @@ JSON 示例需补 `roundSince` 字段；`docs/features/config.md` 需说明 `wat
   Node 内建模块，是唯一安全的落点。
 - `src/state.ts` 的**再导出**保证既有引用路径（例如 `import { STOP_REASONS } from "./state.ts"`）
   继续可用，不强迫调用方改导入路径。
-- **TUI 标签表为何不派生**：`test/tui-delivery.test.ts` 用 `new Function` 把
+- **TUI 标签表为何不派生**：v0.5.3 时 `test/tui-delivery.test.ts` 用 `new Function` 把
   `src/tui.tsx` 中 `STOP_REASON_LABELS` 所在的源码区间**单独求值**（剥掉 `export` 与类型标注后
   构造工厂函数），标签表若引用 `STOP_REASONS` 就会在该隔离作用域里找不到标识符。
-  因此标签表必须是**自足的字面量对象**，一致性改由测试断言：键集合与 `STOP_REASONS`
-  完全相等、每个取值都有非空短语。
+  v0.5.5 把标签表与其它纯逻辑抽到 `src/tui-logic.ts`（见 §11.5）后，测试改为直接
+  `import` 该模块；但标签表仍保持**自足的字面量对象**，一致性继续由测试断言：
+  键集合与 `STOP_REASONS` 完全相等、每个取值都有非空短语。
 
 **验收**：
 
@@ -550,14 +596,14 @@ JSON 示例需补 `roundSince` 字段；`docs/features/config.md` 需说明 `wat
 
 ### 9.5 测试定时器泄漏
 
-**问题**：`test/server.test.ts` 的 `makeEngine()`（`test/server.test.ts:180`）构造
+**问题**：`test/server.test.ts` 的 `makeEngine()` 构造
 `AutocontinueEngine` 后**从不调用 `engine.dispose()`**。引擎在测试期间启动的
 per-session Timeout 与 per-session Interval 全部残留——测试跑完后仍有 **15 个活跃定时器**，
 官方命令 `node --test` 因此**永久挂起不退出**；当前只能靠 `--test-force-exit`
 强制退出（192/192 用例全绿）。
 
-`engine.dispose()`（`src/engine.ts:1036`）正是为此存在：它 `clearTimeout` 全部 `timers`、
-`clearInterval` 全部 `intervalTimers`、并 abort 在飞的验证控制器。
+`engine.dispose()`（`src/engine.ts` 的 `AutocontinueEngine.dispose`）正是为此存在：
+它 `clearTimeout` 全部 `timers`、`clearInterval` 全部 `intervalTimers`、并 abort 在飞的验证控制器。
 
 **裁定语义**：
 
@@ -572,27 +618,33 @@ per-session Timeout 与 per-session Interval 全部残留——测试跑完后�
 3. `makeEngine()` 必须在每个用例结束时释放引擎：让 `makeEngine()` 返回一个
    `dispose()` 辅助函数（或用 `t.after(() => engine.dispose())` 注册清理），
    确保**每个**用例都调用 `engine.dispose()`。
-4. 清理必须覆盖全部五个测试文件——`test/server.test.ts`、`test/config-safety.test.ts`、
-   `test/tui-delivery.test.ts`、`test/verify-safety.test.ts`、`test/session-resolution.test.ts`
-   中凡是构造引擎或持有定时器的用例都要释放。
+4. 清理必须覆盖**全部**测试文件——凡是构造引擎或持有定时器的用例都要释放
+   （当前实现已统一到 `test/support/harness.ts` 的 `createEngine()` / `disposeEngines()`）。
 
 **验收**：
 
 - `npm test` 跑完自行退出（退出码 0），**不加** `--test-force-exit`；
 - 退出前无残留活跃句柄（`process.getActiveResourcesInfo()` 不含 `Timeout`）。
 
-**文档同步（本轮不实施，留给实现轮）**：`AGENTS.md` 的测试命令、`docs/architecture/overview.md`
-的测试说明需同步为新的 `npm test` 命令。
+**状态：已完成**。
+
+- `package.json` 的 `test` script 已改为
+  `node --experimental-strip-types --test "test/*.test.ts"`，不含 `--test-force-exit`。
+- 引擎释放统一收口到共享夹具 `test/support/harness.ts`：`createEngine()` 注册每个引擎实例，
+  `disposeEngines()` 在各测试文件的 `afterEach` 中释放，并检查是否有引擎漏释放（有则抛错）。
+  守卫辅助函数为 `assertNoLiveEngines()`。
+- 文档同步已完成：`AGENTS.md` 与 `docs/architecture/overview.md` 的测试命令均已指向新的
+  `npm test`。
 
 ### 9.6 v0.5.3 实施清单汇总
 
-| # | 条目 | 主要落点 |
-|---|---|---|
-| 9.1 | `maxConsecutive` 负值回退 | `src/config.ts`（`mergeConfig`） |
-| 9.2 | 墙钟预算按轮次 | `src/rpc.ts`（`WatchState.roundSince`）、`src/state.ts`（`watch`/`resume`/`hydrate`）、`src/engine.ts`（两处墙钟判定） |
-| 9.3 | 第 8 个停止原因 | `src/rpc.ts`（`STOP_REASONS` 真源追加 `title-excluded`）、`src/state.ts`（导入并再导出）、`src/engine.ts`（标题排除分支）、`src/tui.tsx`（标签表） |
-| 9.4 | 停止原因单一真源 | `src/rpc.ts`（唯一定义 + 两处 schema enum 与 `RpcContract` 联合类型派生）、`src/state.ts`（导入并再导出）、`src/tui.tsx`（标签表由测试守卫） + 一致性测试 |
-| 9.5 | 测试定时器泄漏 | `test/*.test.ts`、`package.json`（`test` script） |
+| # | 条目 | 主要落点 | 状态 |
+|---|---|---|---|
+| 9.1 | `maxConsecutive` 负值回退 | `src/config.ts`（`mergeConfig`） | 已发布 |
+| 9.2 | 墙钟预算按轮次 | `src/rpc.ts`（`WatchState.roundSince`）、`src/state.ts`（`watch`/`resume`/`hydrate`）、`src/engine.ts`（两处墙钟判定） | 已发布 |
+| 9.3 | 第 8 个停止原因 | `src/rpc.ts`（`STOP_REASONS` 真源追加 `title-excluded`）、`src/state.ts`（导入并再导出）、`src/engine.ts`（标题排除分支）、`src/tui-logic.ts`（标签表） | 已发布 |
+| 9.4 | 停止原因单一真源 | `src/rpc.ts`（唯一定义 + 两处 schema enum 与 `RpcContract` 联合类型派生）、`src/state.ts`（导入并再导出）、`src/tui-logic.ts`（标签表由测试守卫） + 一致性测试 | 已发布 |
+| 9.5 | 测试定时器泄漏 | `test/*.test.ts`、`test/support/harness.ts`、`package.json`（`test` script） | 已发布 |
 
 **顺序建议**：9.4 先做（它是 9.3 的前置——新增取值时若真源已统一，就不会出现漏改副本）；
 再做 9.3；9.1、9.2 相互独立；9.5 最后做（它会改变测试运行方式，需要在其它改动落定后收口）。
@@ -622,3 +674,100 @@ per-session Timeout 与 per-session Interval 全部残留——测试跑完后�
 
 原断言把默认续跑消息的中文文案硬编码在测试里，改文案就会让测试无故失败。改为与配置常量比对：
 断言的是**行为**（注入的就是配置的那条消息），而不是文案本身。
+
+> **状态：部分完成。** 默认续跑消息与 `finalCheckMessage` 的**部分**断言已改为与配置常量比对，
+> 但 `test/server.test.ts` 中仍有中文文案字面量断言（如 `/^继续执行/`、`/整体检查/`）。
+> v0.5.5 未补完，详见 `docs/decisions/changelog.md` 的 v0.5.5「本版没有做的事」。
+
+---
+
+## 11. v0.5.5 增量
+
+> 本节记录 v0.5.5 的增量。主题是**加固**：配置写错时不再静默、值守状态不再被误清、
+> 回声不再被误判为真实用户消息。
+
+### 11.1 配置校验与诊断
+
+`src/config.ts` 的 `mergeConfig` 与 `readConfigFile` 增加了一整层校验与告警，
+全部告警走 `console.error`（输出到 stderr / 宿主日志），**不静默丢弃**。
+
+**读取诊断**（`readConfigFile`）：
+
+| 情形 | 行为 |
+|---|---|
+| 文件**不存在** | **静默**回退默认值（正常路径，不打扰用户） |
+| 读取**失败**（权限、路径被目录占位、I/O 错误） | `console.error` 一条，含**配置文件绝对路径**与错误信息，随后回退默认值 |
+| **解析失败**（JSONC 语法错误） | `console.error` 一条，含**配置文件绝对路径**与错误信息，随后回退默认值 |
+
+**值校验**（`mergeConfig`）：
+
+- **JSONC 尾逗号前瞻跳过注释**：`1, // 说明\n}` 这类写法不再被当成语法错误。
+- **6 个数组型配置键剔除空字符串**：`completionMarkers` / `errorPatterns` / `excludePatterns` /
+  `excludeTitleKeywords` / `escalationPressureLadder` / `frustrationTriggers`。
+  空串是任何字符串的子串，留着会让匹配器命中一切。
+- **`markerRegex` 三重防护**（常量 `MAX_MARKER_REGEX_SOURCE_LENGTH = 1024`）：
+  源长度超限 → 忽略并告警；检测到**嵌套量词**（ReDoS 风险）→ 忽略并告警；
+  正则**不可编译** → 忽略并告警。三种情形一律回落到 `completionMarkers`。
+- **`startTime` / `endTime` 校验 `HH:MM`**（时 ≤ 23、分 ≤ 59）：非法值**回退为空**
+  （= 不限制每日窗口）并告警。
+- **数值钳制**（常量 `MAX_TIMER_DELAY_MS = 2^31 - 1`）：
+  `idleDelayMs` / `minIntervalMs` / `userGraceMs` 的**负值钳到 0**；
+  `intervalMs` / `idleDelayMs` / `minIntervalMs` **超过上限**时钳到上限并告警。
+  `intervalMs` 的 `0 = 关闭周期检查` 语义保持可达（只对正值套用 1s 下限）。
+
+> 注意：`verifyTimeoutMs` / `verifyMaxIterations` / `watchTimeoutMs` 的既有钳制保持不变。
+
+### 11.2 错误匹配串统一
+
+`src/events.ts` 的 `errorToMatchString` 在 `name` 缺失时**回退读 `type`**——
+宿主在消息事件路径上用 `name` 标注失败，在 retry hook 路径上用 `type` 标注。
+此前两条路径对**同一类错误**产出**不同的匹配串**，导致「消息事件路径判为可重试、
+retry hook 路径判为不可重试」这类分歧。回退后两条路径产出**同一个**匹配串。
+
+同时 `isRetryableError` 与 `titleExcluded` 在运行时**跳过空串** pattern / exclude /
+标题关键词——这是配置加载之外的**最后一道防线**。
+
+### 11.3 护栏与生命周期加固
+
+- **回声幂等**（`src/engine.ts` 的 `isSelfEcho`）：注入记录在整个 `selfEchoWindowMs`
+  窗口内保持有效。同一条注入被宿主以**两种事件形状**各投递一次时，第二次投递同样
+  被识别为自身回声，不再触发 `resume()` 清零「注入上限 / 验证失败计数 / 轮次墙钟」
+  三重上界。详见 §2。
+- **回声时间窗兜底**（同函数）：入站文本**提取不到**且窗口内确有自注入记录时，
+  判定为自身回声。残留风险见 §2.1 与 `docs/decisions/known-issues.md`。
+- **`roundId` 进程级全局单调递增**（`src/state.ts` 的 `allocateRoundId`）：
+  此前 `roundId` 从 0 重新开始，off → on 之后**陈旧的验证结果**可能被当成新一轮的结果。
+- **在途注入锁与每轮缓存拆分**（`src/state.ts` 的 `watch` / `unwatch` / `resetRoundCache`）：
+  `watch()` 重置**每轮缓存**但**不清除在途注入锁**；`unwatch()` 两者都清。
+- **引擎 disposed 守卫**（`src/engine.ts`）：disposed 后**不再新建定时器**、
+  **不再改写持久化状态**。
+- **final-check 复检**（`src/engine.ts`）：完成复查轮的注入在 `await` 之后**复检会话
+  是否仍被值守**，避免用户在这段窗口内关闭值守后仍发生注入。
+- **定时器延迟钳制**（`src/engine.ts` 的 `clampTimerDelay`）：引擎排出的**每个**定时器
+  延迟都钳到 `2^31 - 1`——超限值此前会退化成 1ms 热循环。
+- **配置读取位置前移**（`src/engine.ts`）：非值守会话的事件**不再白读两次盘**；
+  回声判断复用**已加载**的配置。
+- **验证门控的轮次快照**（`src/engine.ts` 的 `runVerifyGate`）：命令**启动前**重读一份
+  状态快照并校验，命令**返回后**复检 `roundId` 是否变化——避免命令运行期间的
+  `resume()` 让陈旧结果通过。
+
+### 11.4 验证进程终止的未捕获异常
+
+`src/verify.ts` 的 Windows 进程树终止助手补上 **spawn 失败监听**：
+此前进程启动失败是**异步**发生的，会变成**未捕获异常**并可能带崩宿主进程；
+现在被捕获并转为正常的验证失败。
+
+### 11.5 TUI 纯逻辑抽离
+
+停止原因文案表（`STOP_REASON_LABELS`）、时长格式化（`formatDuration`）、
+watch 状态合并（`mergeWatchState`）三块**纯逻辑**从 `src/tui.tsx` 抽出到新建的
+`src/tui-logic.ts`。该模块**无 JSX、无 solid-js 依赖、无宿主 SDK 依赖**，
+测试可以直接 `import` 它，不必再从 `.tsx` 源码里刮表（见 §9.4）。
+
+`src/tui.tsx` 保留再导出，既有引用路径不变。
+
+### 11.6 脱敏扫描器扩充
+
+`scripts/sanitize-scan.ts` 的扫描规则扩充为 **12 条模式**：修正了 **Telegram token**
+的匹配形状（此前带描述文字前缀，导致真实 token 永远匹配不到）；补充**本机用户名**与
+`/home/<用户名>` 形态；产物文件按形态识别。

@@ -22,17 +22,14 @@ OpenCode V2 插件：自动续跑因非用户原因中断、但整体任务尚�
 | | [decisions/roadmap.md](decisions/roadmap.md) | 已实现 / 真机待办 / 本轮进行中 / 未来方向 / 不移植清单 |
 | | [decisions/changelog.md](decisions/changelog.md) | 版本变更记录 |
 
-## 5 分钟上手
+## 从哪里开始
 
-1. **装**：`opencode plugin add github:dubuqiangu/opencode-autocontinue`
-2. **重启**：完整重启 opencode（`opencode service restart` 或退出重开；`/reload` 不会重载插件）
-3. **开启值守**：在目标会话里输入 `/autocontinue on`
-4. **确认生效**：底部 footer 出现 `[AC ●]`
-5. **看状态**：输入 `/autocontinue status`，toast 显示 `Watching · watching · N injection(s)`
-6. **关掉**：输入 `/autocontinue off`，footer 指示消失
+本页只做索引，不重复任何操作步骤——每份文档各司其职：
 
-## 快速链接
-
-- 装机：`opencode plugin add github:dubuqiangu/opencode-autocontinue` → [安装指南](guides/install.md)
-- 上手：会话内 `/autocontinue on`，footer 出现 `[AC ●]` → [命令](features/commands.md)
-- 当前状态：v0.5.4 已发布（本轮为内部 API 扩展与测试可维护性改进，无用户可见行为变更）；真实待办只剩实机验证——D1b 跨午夜窗口与侧栏、D2 续跑实测（含验证 TOCTOU 复检）、D3 卸载重装干净（含 stopReason 短语显示） → [任务清单](../tasks.md)、[变更记录](decisions/changelog.md)
+- **第一次安装**（前置要求 / 一键安装 / 验证清单 / 更新 / 卸载）：[安装指南](guides/install.md)
+- **`/autocontinue on|off|status` 做了什么、toast 怎么显示**：[命令](features/commands.md)
+- **footer 指示与右侧栏 Watch 块长什么样**：[footer 指示](features/footer.md)
+- **自动续跑的判定链、停止条件与注入通道**：[引擎](features/engine.md)
+- **全部配置项与默认值**：[配置](features/config.md)
+- **设计意图与机制裁定**：[DESIGN.md](../DESIGN.md)、[机制规格](architecture/loop-mechanisms.md)
+- **当前版本状态与真机待办**：v0.5.4 已发布（本轮为内部 API 扩展与测试可维护性改进，无用户可见行为变更）；真实待办只剩实机验证——D1b 跨午夜窗口与侧栏、D2 续跑实测（含验证 TOCTOU 复检）、D3 卸载重装干净（含 stopReason 短语显示） → [任务清单](../tasks.md)、[变更记录](decisions/changelog.md)

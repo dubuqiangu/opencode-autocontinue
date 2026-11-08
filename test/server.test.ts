@@ -162,7 +162,13 @@ import type { SpawnAdapter } from "../src/verify.ts"
 // one. There is exactly ONE FakeStorage and ONE makeFakeSession
 // implementation in the repo, so do not reintroduce a local copy here.
 
-import { createEngine, disposeEngines, FakeStorage, makeFakeSession } from "./support/harness.ts"
+import {
+  createEngine,
+  disposeEngines,
+  FakeStorage,
+  makeFakeSession,
+  withFakeClock,
+} from "./support/harness.ts"
 
 afterEach(() => {
   disposeEngines()
@@ -715,6 +721,82 @@ test("retryHookHandler matches bare 5xx status via appended status", () => {
   }
   retryHookHandler(() => DEFAULT_CONFIG, event as any)
   assert.equal(event.decision.retry, true)
+})
+
+// P1-5: the retry hook path and the message event path must judge the SAME
+// failure with the SAME match string. The host labels a failure with `name`
+// on the message event path and with `type` on the retry hook path, so the
+// normalization has to fall back to `type`.
+
+test("P1-5: the retry hook and the message event path judge one error identically", () => {
+  const error = { type: "ai_error", message: "bad_response_status_code", status: 502 }
+  const matchString = errorToMatchString(error).toLowerCase()
+  assert.ok(matchString.includes("ai_error"), "the type must be part of the match string")
+  assert.ok(matchString.includes("bad_response_status_code"))
+  assert.ok(matchString.includes("(status: 502)"), "the status must be part of the match string")
+
+  const pluginConfig = {
+    ...DEFAULT_CONFIG,
+    errorPatterns: ["bad_response_status_code"],
+    excludePatterns: [] as string[],
+  }
+  const retryEvent = { error, attempt: 1, decision: { retry: false } }
+  retryHookHandler(() => pluginConfig, retryEvent as any)
+  assert.equal(retryEvent.decision.retry, true, "the retry hook must retry a matching failure")
+  assert.equal(
+    isRetryableError(error, pluginConfig.errorPatterns, pluginConfig.excludePatterns),
+    true,
+    "the message event path must judge the same failure as retryable",
+  )
+
+  // An excluded failure is rejected by BOTH paths.
+  const excludingConfig = {
+    ...DEFAULT_CONFIG,
+    errorPatterns: ["bad_response_status_code"],
+    excludePatterns: ["ai_error"],
+  }
+  const excludedEvent = { error, attempt: 1, decision: { retry: false } }
+  retryHookHandler(() => excludingConfig, excludedEvent as any)
+  assert.equal(excludedEvent.decision.retry, false, "the retry hook must honour the exclude list")
+  assert.equal(
+    isRetryableError(error, excludingConfig.errorPatterns, excludingConfig.excludePatterns),
+    false,
+    "the message event path must honour the same exclude list",
+  )
+})
+
+test("P1-5: one errorPatterns entry matches on the retry hook and on the message event path", async () => {
+  const error = { type: "ai_error", message: "bad_response_status_code", status: 502 }
+  const matchString = errorToMatchString(error).toLowerCase()
+
+  for (const pattern of ["ai_error", "bad_response_status_code", "(status: 502"]) {
+    assert.ok(matchString.includes(pattern), `the match string must carry ${pattern}`)
+    assert.equal(
+      isRetryableError(error, [pattern], []),
+      true,
+      `the message event path must match ${pattern}`,
+    )
+    const retryEvent = { error, attempt: 1, decision: { retry: false } }
+    retryHookHandler(
+      () => ({ ...DEFAULT_CONFIG, errorPatterns: [pattern], excludePatterns: [] }),
+      retryEvent as any,
+    )
+    assert.equal(retryEvent.decision.retry, true, `the retry hook path must match ${pattern}`)
+  }
+
+  // The engine's message event path latches the very same failure.
+  const { store, engine } = await makeEngine({ errorPatterns: ["ai_error"], excludePatterns: [] })
+  await store.watch("ses_p15_event")
+  await engine.handleEvent({
+    type: "session.error",
+    sessionID: "ses_p15_event",
+    properties: { error },
+  })
+  assert.equal(
+    store.getMemory("ses_p15_event").pendingContinue,
+    true,
+    "the message event path must latch the retryable failure",
+  )
 })
 
 test("concurrent maybeInject calls only inject once (inFlight guard)", async () => {
@@ -1935,28 +2017,8 @@ test("engine observes the last tool failure only when observeToolFailures is ena
 
 // --- §8.3 full-project review fixes (v0.5.1) ---
 
-/** Freeze the process clock at `epochMs` while `run` executes so the
- *  time-window gates can be tested deterministically. Restores the real Date
- *  afterwards; top-level node:test tests run sequentially, so the override
- *  cannot leak into a concurrent test. */
-async function withFrozenClock(epochMs: number, run: () => void | Promise<void>): Promise<void> {
-  const RealDate = Date
-  class FrozenDate extends RealDate {
-    constructor(...args: any[]) {
-      if (args.length === 0) super(epochMs)
-      else super(...args)
-    }
-    static now(): number {
-      return epochMs
-    }
-  }
-  ;(globalThis as any).Date = FrozenDate
-  try {
-    await run()
-  } finally {
-    ;(globalThis as any).Date = RealDate
-  }
-}
+// The clock helper lives in test/support/harness.ts (withFakeClock): the repo
+// keeps exactly ONE clock helper, so this file must not grow a second one.
 
 /** Local epoch ms for today at HH:MM. */
 function todayAt(hours: number, minutes: number): number {
@@ -1968,13 +2030,13 @@ function todayAt(hours: number, minutes: number): number {
 // F1: cross-midnight-aware start gate.
 
 test("startGateClosed: non-cross-midnight window closes before startTime", async () => {
-  await withFrozenClock(todayAt(7, 0), () => {
+  await withFakeClock(todayAt(7, 0), () => {
     assert.equal(startGateClosed("09:00", "17:00"), true) // before start
   })
-  await withFrozenClock(todayAt(10, 0), () => {
+  await withFakeClock(todayAt(10, 0), () => {
     assert.equal(startGateClosed("09:00", "17:00"), false) // window open
   })
-  await withFrozenClock(todayAt(18, 0), () => {
+  await withFakeClock(todayAt(18, 0), () => {
     assert.equal(startGateClosed("09:00", "17:00"), false) // mirrors startTimeNotReached
   })
   assert.equal(startGateClosed("", "08:30"), false) // empty start = always open
@@ -1983,19 +2045,19 @@ test("startGateClosed: non-cross-midnight window closes before startTime", async
 test("startGateClosed: cross-midnight tail is open, pre-start gap is closed", async () => {
   // 22:00 -> 08:30: at 03:00 (before startTime but before endTime) the window
   // is STILL OPEN; at 09:00 (before startTime but past endTime) it is closed.
-  await withFrozenClock(todayAt(3, 0), () => {
+  await withFakeClock(todayAt(3, 0), () => {
     assert.equal(startGateClosed("22:00", "08:30"), false)
   })
-  await withFrozenClock(todayAt(9, 0), () => {
+  await withFakeClock(todayAt(9, 0), () => {
     assert.equal(startGateClosed("22:00", "08:30"), true)
   })
-  await withFrozenClock(todayAt(23, 0), () => {
+  await withFakeClock(todayAt(23, 0), () => {
     assert.equal(startGateClosed("22:00", "08:30"), false)
   })
 })
 
 test("F1: a cross-midnight window still injects at a post-midnight clock", async () => {
-  await withFrozenClock(todayAt(3, 0), async () => {
+  await withFakeClock(todayAt(3, 0), async () => {
     const { session, store, engine } = await makeEngine({
       intervalMs: 60_000,
       idleDelayMs: 5,

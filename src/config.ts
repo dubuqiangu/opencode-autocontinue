@@ -141,6 +141,82 @@ export const DEFAULT_CONFIG: PluginConfig = {
     "用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。",
 }
 
+/** Maximum accepted length of a user supplied markerRegex source. */
+const MAX_MARKER_REGEX_SOURCE_LENGTH = 1024
+
+/** Largest delay (ms) a Node timer can represent. Larger values overflow and
+ *  fire immediately, so they are clamped down to this ceiling. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1
+
+// Skip whitespace and comments starting at `from`, returning the index of the
+// next meaningful character (or text.length when only trivia remains).
+// The trailing-comma lookahead uses this so a comma followed by a comment and
+// then a closing brace is still recognized as a trailing comma.
+function skipTrivia(text: string, from: number): number {
+  let position = from
+  while (position < text.length) {
+    const char = text[position]
+    if (/\s/.test(char)) {
+      position++
+      continue
+    }
+    if (char === "/" && text[position + 1] === "/") {
+      while (position < text.length && text[position] !== "\n") position++
+      continue
+    }
+    if (char === "/" && text[position + 1] === "*") {
+      position += 2
+      while (position < text.length && !(text[position] === "*" && text[position + 1] === "/")) position++
+      position += 2
+      continue
+    }
+    return position
+  }
+  return Math.min(position, text.length)
+}
+
+// Keep only the usable entries of a config array: strings that are not empty.
+// A blank entry is never useful — "" is a substring of every string, so an
+// empty pattern would match every error and an empty marker every message.
+function usableStringList(entries: unknown[]): string[] {
+  return entries.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+}
+
+// Extract a readable message from an unknown thrown value.
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+// Validate an HH:MM local clock value. An empty string disables the window.
+// Anything else must match ^\d{1,2}:\d{2}$ with hour <= 23 and minute <= 59;
+// an invalid value is reported once and falls back to "no window".
+function validatedClockTime(value: string, keyName: string): string {
+  if (value === "") return value
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value)
+  const hours = match ? Number(match[1]) : Number.NaN
+  const minutes = match ? Number(match[2]) : Number.NaN
+  if (!match || hours > 23 || minutes > 59) {
+    console.error(
+      `[opencode-autocontinue] ignored invalid config "${keyName}": expected HH:MM (00:00-23:59), got ${JSON.stringify(value)}`,
+    )
+    return ""
+  }
+  return value
+}
+
+// Clamp a delay (ms) into the safe timer range: a negative delay would cancel
+// the guardrail it belongs to, and a delay beyond the 32 bit timer ceiling
+// overflows and fires immediately.
+function clampedDelay(value: number, keyName: string): number {
+  if (value > MAX_TIMER_DELAY_MS) {
+    console.error(
+      `[opencode-autocontinue] clamped config "${keyName}": ${value} exceeds the maximum timer delay of ${MAX_TIMER_DELAY_MS} ms`,
+    )
+    return MAX_TIMER_DELAY_MS
+  }
+  return Math.max(0, value)
+}
+
 /** Strip // and /* *\/ comments and trailing commas from JSONC, then JSON.parse.
  *  Single-quoted strings are normalized to double-quoted so JSON.parse accepts them. */
 export function parseJsonc(text: string): unknown {
@@ -196,8 +272,8 @@ export function parseJsonc(text: string): unknown {
       // Drop a real trailing comma only when the next non-whitespace char
       // closes the object/array. Commas inside strings never reach here
       // (handled by the inString branch above), so "a,}" stays intact.
-      let lookahead = index + 1
-      while (lookahead < text.length && /\s/.test(text[lookahead])) lookahead++
+      // Look past whitespace AND comments: "1, // note\n}" is a trailing comma.
+      const lookahead = skipTrivia(text, index + 1)
       if (text[lookahead] === "}" || text[lookahead] === "]") {
         index++
         continue
@@ -218,13 +294,17 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   const merged: PluginConfig = { ...base }
   if (typeof overrides.enabled === "boolean") merged.enabled = overrides.enabled
   if (typeof overrides.message === "string" && overrides.message) merged.message = overrides.message
-  if (typeof overrides.startTime === "string") merged.startTime = overrides.startTime
-  if (typeof overrides.endTime === "string") merged.endTime = overrides.endTime
+  if (typeof overrides.startTime === "string") {
+    merged.startTime = validatedClockTime(overrides.startTime, "startTime")
+  }
+  if (typeof overrides.endTime === "string") {
+    merged.endTime = validatedClockTime(overrides.endTime, "endTime")
+  }
   if (typeof overrides.idleDelayMs === "number" && Number.isFinite(overrides.idleDelayMs)) {
-    merged.idleDelayMs = overrides.idleDelayMs
+    merged.idleDelayMs = clampedDelay(overrides.idleDelayMs, "idleDelayMs")
   }
   if (typeof overrides.minIntervalMs === "number" && Number.isFinite(overrides.minIntervalMs)) {
-    merged.minIntervalMs = overrides.minIntervalMs
+    merged.minIntervalMs = clampedDelay(overrides.minIntervalMs, "minIntervalMs")
   }
   if (typeof overrides.maxConsecutive === "number" && Number.isFinite(overrides.maxConsecutive)) {
     if (overrides.maxConsecutive >= 0) {
@@ -244,38 +324,63 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
     merged.watchTimeoutMs = Math.max(0, overrides.watchTimeoutMs)
   }
   if (Array.isArray(overrides.completionMarkers)) {
-    merged.completionMarkers = overrides.completionMarkers.filter(
-      (marker): marker is string => typeof marker === "string",
-    )
+    merged.completionMarkers = usableStringList(overrides.completionMarkers)
   }
-  if (typeof overrides.markerRegex === "string") merged.markerRegex = overrides.markerRegex
+  if (typeof overrides.markerRegex === "string") {
+    const markerRegexSource = overrides.markerRegex
+    if (markerRegexSource.length > MAX_MARKER_REGEX_SOURCE_LENGTH) {
+      console.error(
+        `[opencode-autocontinue] ignored invalid config "markerRegex": source is longer than ${MAX_MARKER_REGEX_SOURCE_LENGTH} characters`,
+      )
+    } else if (/\([^)]*[+*]\)[+*]/.test(markerRegexSource)) {
+      console.error(
+        `[opencode-autocontinue] ignored invalid config "markerRegex": nested quantifiers may cause catastrophic backtracking (ReDoS)`,
+      )
+    } else {
+      try {
+        new RegExp(markerRegexSource, "i")
+        merged.markerRegex = markerRegexSource
+      } catch (error) {
+        console.error(
+          `[opencode-autocontinue] ignored invalid config "markerRegex": ${errorMessage(error)}`,
+        )
+      }
+    }
+  }
   if (typeof overrides.finalCheckEnabled === "boolean") merged.finalCheckEnabled = overrides.finalCheckEnabled
   if (typeof overrides.finalCheckMessage === "string" && overrides.finalCheckMessage) {
     merged.finalCheckMessage = overrides.finalCheckMessage
   }
   if (Array.isArray(overrides.errorPatterns)) {
-    merged.errorPatterns = overrides.errorPatterns.filter(
-      (pattern): pattern is string => typeof pattern === "string",
-    )
+    merged.errorPatterns = usableStringList(overrides.errorPatterns)
   }
   if (Array.isArray(overrides.excludePatterns)) {
-    merged.excludePatterns = overrides.excludePatterns.filter(
-      (pattern): pattern is string => typeof pattern === "string",
-    )
+    merged.excludePatterns = usableStringList(overrides.excludePatterns)
   }
   if (Array.isArray(overrides.excludeTitleKeywords)) {
-    merged.excludeTitleKeywords = overrides.excludeTitleKeywords.filter(
-      (keyword): keyword is string => typeof keyword === "string",
-    )
+    merged.excludeTitleKeywords = usableStringList(overrides.excludeTitleKeywords)
   }
   if (typeof overrides.userGraceMs === "number" && Number.isFinite(overrides.userGraceMs)) {
-    merged.userGraceMs = overrides.userGraceMs
+    // 0 keeps its meaning ("do not wait"); only negatives are clamped away.
+    merged.userGraceMs = Math.max(0, overrides.userGraceMs)
   }
   // intervalMs: 0 means periodic checks disabled (scheduleInterval honors <=0).
   // Preserve the P2-7 anti-spam floor (min 1s) only for positive values, so the
   // documented "0 = disabled" escape hatch is actually reachable via config.
   if (typeof overrides.intervalMs === "number" && Number.isFinite(overrides.intervalMs)) {
-    merged.intervalMs = overrides.intervalMs <= 0 ? 0 : Math.max(1_000, overrides.intervalMs)
+    if (overrides.intervalMs <= 0) {
+      merged.intervalMs = 0
+    } else {
+      const flooredInterval = Math.max(1_000, overrides.intervalMs)
+      if (flooredInterval > MAX_TIMER_DELAY_MS) {
+        console.error(
+          `[opencode-autocontinue] clamped config "intervalMs": ${overrides.intervalMs} exceeds the maximum timer delay of ${MAX_TIMER_DELAY_MS} ms`,
+        )
+        merged.intervalMs = MAX_TIMER_DELAY_MS
+      } else {
+        merged.intervalMs = flooredInterval
+      }
+    }
   }
   if (typeof overrides.verifyCommand === "string") merged.verifyCommand = overrides.verifyCommand
   if (typeof overrides.verifyTimeoutMs === "number" && Number.isFinite(overrides.verifyTimeoutMs)) {
@@ -302,17 +407,13 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
   // A provided array replaces the default (never concatenated); an explicit
   // empty array is honored so `escalationPressureLadder: []` disables the line.
   if (Array.isArray(overrides.escalationPressureLadder)) {
-    merged.escalationPressureLadder = overrides.escalationPressureLadder.filter(
-      (prompt): prompt is string => typeof prompt === "string",
-    )
+    merged.escalationPressureLadder = usableStringList(overrides.escalationPressureLadder)
   }
   if (typeof overrides.observeToolFailures === "boolean") merged.observeToolFailures = overrides.observeToolFailures
   // P2: the trigger list REPLACES the default (never concatenated) and an
   // explicit [] disables the frustration path. Blank entries are dropped.
   if (Array.isArray(overrides.frustrationTriggers)) {
-    merged.frustrationTriggers = overrides.frustrationTriggers.filter(
-      (trigger): trigger is string => typeof trigger === "string" && trigger.length > 0,
-    )
+    merged.frustrationTriggers = usableStringList(overrides.frustrationTriggers)
   }
   if (typeof overrides.frustrationMessage === "string") {
     merged.frustrationMessage = overrides.frustrationMessage
@@ -321,9 +422,26 @@ export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
 }
 
 function readConfigFile(filePath: string): unknown | null {
+  let fileContent: string
   try {
-    return parseJsonc(readFileSync(filePath, "utf-8"))
-  } catch {
+    fileContent = readFileSync(filePath, "utf-8")
+  } catch (error) {
+    // A missing config file is the normal case: stay silent and fall back to
+    // the defaults. Any other failure (permissions, a directory in the way,
+    // an I/O error) is worth reporting — swallowing it hides a broken setup.
+    const errorCode = (error as { code?: string } | null)?.code
+    if (errorCode === "ENOENT") return null
+    console.error(
+      `[opencode-autocontinue] failed to read config file ${filePath}: ${errorMessage(error)}`,
+    )
+    return null
+  }
+  try {
+    return parseJsonc(fileContent)
+  } catch (error) {
+    console.error(
+      `[opencode-autocontinue] failed to parse config file ${filePath}: ${errorMessage(error)}`,
+    )
     return null
   }
 }
@@ -365,7 +483,11 @@ export function buildCompletionMatcher(config: PluginConfig): RegExp | null {
       // Fall through to markers on invalid regex.
     }
   }
-  const escaped = config.completionMarkers.map((marker) => marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  // Blank markers are dropped: an empty alternative would make the matcher
+  // match every text (the same effect as the regex /(?:)/i).
+  const escaped = config.completionMarkers
+    .filter((marker) => marker.length > 0)
+    .map((marker) => marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
   if (escaped.length === 0) return null
   return new RegExp(escaped.join("|"), "i")
 }

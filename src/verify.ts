@@ -39,7 +39,7 @@ export interface SpawnOutcome {
 
 export type SpawnAdapter = (
   argv: string[],
-  opts: { cwd: string; timeoutMs: number; signal?: AbortSignal },
+  opts: { cwd: string; timeoutMs: number; env?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<SpawnOutcome>
 
 /** Shell argv for a raw command string, per platform.
@@ -124,7 +124,7 @@ export function buildVerifyDetail(command: string, result: VerifyResult): string
  *  and a hard fallback timer so a hung child can never hold the engine lock. */
 async function defaultSpawn(
   argv: string[],
-  opts: { cwd: string; timeoutMs: number; signal?: AbortSignal },
+  opts: { cwd: string; timeoutMs: number; env?: Record<string, string>; signal?: AbortSignal },
 ): Promise<SpawnOutcome> {
   const { spawn } = await import("node:child_process")
   const isWindows = process.platform === "win32"
@@ -161,7 +161,21 @@ async function defaultSpawn(
       if (pid === undefined) return
       try {
         if (isWindows) {
-          spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true })
+          // The tree-kill helper is fire-and-forget. A failed spawn emits an
+          // asynchronous "error" event; an unhandled one is thrown as an
+          // uncaught exception and would take the host process down. Swallow
+          // it and fall back to killing the direct child.
+          const killer = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+            windowsHide: true,
+          })
+          killer.on("error", () => {
+            try {
+              child.kill("SIGKILL")
+            } catch {
+              // Already gone.
+            }
+          })
+          killer.unref()
         } else {
           process.kill(-pid, "SIGKILL")
         }

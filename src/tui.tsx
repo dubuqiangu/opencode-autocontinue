@@ -28,72 +28,25 @@ import { AUTOCONTINUE_RPC_CONTRACT } from "./rpc.ts"
 // router), extracted as a pure module so the v0.3.6 "No current session"
 // regression is unit-locked.
 import { resolveSessionID } from "./session-resolution.ts"
+// Pure TUI helpers (stop-reason labels, duration formatting, the
+// `state.changed` merge rule) live in a JSX-free, solid-free module so the
+// test suite can import them directly instead of scraping this file's text.
+import { STOP_REASON_LABELS, formatDuration, mergeWatchState, stopReasonLabel } from "./tui-logic.ts"
+import type { WatchStatusView } from "./tui-logic.ts"
 // 0.3.5: slot mounts that create their render effects inside the plugin's own
 // module graph (see reactive-mount.ts — pitfall #13 verdict, mirrors
 // opencode-usage-meter v0.7.22).
 import { createReactiveSlotMount } from "./reactive-mount.ts"
 
-const RPC_ID = "autocontinue"
+// The stop-reason helpers keep their historical export names on the plugin
+// module; the implementation now lives in ./tui-logic.ts.
+export { STOP_REASON_LABELS, stopReasonLabel }
 
-interface WatchStatusView {
-  sessionID: string
-  state: "watching" | "confirming" | "stopped" | "paused" | "done"
-  injections: number
-  /** Lifetime injections for this watch (never reset by user turns). */
-  totalInjections?: number
-  lastInjectedAt?: number
-  /** Epoch ms when watching started for this session (drives the sidebar timer). */
-  since?: number
-  /** Failing verification rounds in the current round (verify-driven loop). */
-  rejections?: number
-  /** True while a verification command is in flight for this session. */
-  verifying?: boolean
-  /** Observed distinct tool failures in the current round (opt-in, display only). */
-  toolFailureCount?: number
-  /** Why the round stopped (only present while state is "stopped"). */
-  stopReason?: string
-}
+const RPC_ID = "autocontinue"
 
 type RpcClient = {
   set(input: { sessionID: string; enabled: boolean }): Promise<{ state: string }>
   status(input: { sessionID: string }): Promise<{ watched: boolean; state?: WatchStatusView }>
-}
-
-// "3m 22s" (≥1 min) or "45s"; "10h 13m" (≥1h); "2d 3h" (≥1d).
-// Clamps negative/NaN inputs to "0s".
-function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return "0s"
-  const totalSeconds = Math.floor(ms / 1000)
-  const days = Math.floor(totalSeconds / 86_400)
-  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
-  const minutes = Math.floor((totalSeconds % 3_600) / 60)
-  const seconds = totalSeconds % 60
-  if (days > 0) return `${days}d ${hours}h`
-  if (hours > 0) return `${hours}h ${minutes}m`
-  if (minutes > 0) return `${minutes}m ${seconds}s`
-  return `${seconds}s`
-}
-
-/** Human-readable phrases for the stop reasons reported by the server.
- *  The TUI copy is English (see the "English-only labels" note above), so
- *  these phrases follow the same convention. Unknown / missing reasons map
- *  to undefined so the caller can omit the suffix entirely. */
-export const STOP_REASON_LABELS: Record<string, string> = {
-  "window-closed": "window closed",
-  "watch-timeout": "watch timeout",
-  "injection-cap": "injection cap",
-  "verify-limit": "verify limit",
-  "idle-interrupted": "interrupted while idle",
-  "user-interrupted": "stopped by user",
-  "abort-sentinel": "abort sentinel",
-  "title-excluded": "title excluded",
-}
-
-/** Short human-readable phrase for a stop reason, or undefined when there is
- *  none (e.g. the user unwatched the session). */
-export function stopReasonLabel(reason: string | undefined): string | undefined {
-  if (reason === undefined) return undefined
-  return STOP_REASON_LABELS[reason]
 }
 
 export default Plugin.define({
@@ -155,10 +108,24 @@ export default Plugin.define({
       if (!rpc) return
       try {
         const result = await rpc.status({ sessionID })
-        updateStatus(sessionID, result.state)
+        if (result.watched) {
+          // The server answered and still watches this session — its answer
+          // is authoritative, so the local view is replaced with it.
+          updateStatus(sessionID, result.state)
+        } else {
+          // The server answered "not watched" — only THEN may the local
+          // entry go away.
+          updateStatus(sessionID, undefined)
+        }
       } catch {
-        // RPC may not be registered yet; fall back to unknown.
-        updateStatus(sessionID, undefined)
+        // The status query FAILED (host RPC not registered yet, or
+        // temporarily unavailable). Keep the existing entry: the server may
+        // still be injecting on schedule, and dropping the entry here makes
+        // the footer "[AC ●]" and the sidebar Watch block disappear — a false
+        // "the plugin stopped working" signal that invites the user to
+        // re-run `/autocontinue on` (which resets the counters).
+        // Nothing visible is added for this stale state: the rendered output
+        // stays exactly as it is on the success path.
       }
     }
 
@@ -296,10 +263,10 @@ export default Plugin.define({
         metricLines.push(`🎯 ${status.state}`)
         if (status.verifying) metricLines.push("🔍 verifying")
         if (typeof status.rejections === "number" && status.rejections > 0) {
-          metricLines.push(`🚫 ${status.rejections} rejection(s)`)
+          metricLines.push(`🚫 ${status.rejections} rejection${status.rejections === 1 ? "" : "s"}`)
         }
         if (typeof status.toolFailureCount === "number" && status.toolFailureCount > 0) {
-          metricLines.push(`🛠 ${status.toolFailureCount} tool failure(s)`)
+          metricLines.push(`🛠 ${status.toolFailureCount} tool failure${status.toolFailureCount === 1 ? "" : "s"}`)
         }
         return metricLines.join("\n")
       })
@@ -499,53 +466,29 @@ export default Plugin.define({
             event?.data?.toolFailureCount ?? event?.properties?.toolFailureCount
           const stopReason: string | undefined = event?.data?.stopReason ?? event?.properties?.stopReason
           if (typeof sessionID !== "string") return
+          // Per-session store: events for any watched session update only that
+          // session's entry — no cross-session overwrite. The merge rule (and
+          // the clearing of a stale stopReason) lives in ./tui-logic.ts.
+          const merged = mergeWatchState(statusOf(sessionID), {
+            sessionID,
+            state: typeof state === "string" ? state : "",
+            injections,
+            totalInjections,
+            rejections,
+            verifying,
+            toolFailureCount,
+            stopReason,
+          })
+          if (merged !== undefined) updateStatus(sessionID, merged)
           if (state === "stopped") {
             // "stopped" 既可能是"被值守中因超限/到点停止"，也可能是"用户已 unwatch"。
             // 用 RPC status 复查区分：unwatch 后 status.watched=false → 清空本地信号。
-            // A guardrail stop carries its reason in the event: merge it now so
-            // the footer can show the phrase without waiting for the RPC
-            // round-trip. A plain unwatch carries no reason — nothing is
-            // merged, and the status re-check below clears the local entry.
-            if (typeof stopReason === "string") {
-              const current = statusOf(sessionID)
-              updateStatus(sessionID, {
-                ...(current ?? {}),
-                sessionID,
-                state,
-                injections,
-                ...(typeof totalInjections === "number" ? { totalInjections } : {}),
-                ...(typeof rejections === "number" ? { rejections } : {}),
-                ...(typeof verifying === "boolean" ? { verifying } : {}),
-                ...(typeof toolFailureCount === "number" ? { toolFailureCount } : {}),
-                stopReason,
-              })
-            }
+            // A guardrail stop carries its reason in the event: the merge above
+            // already put the phrase in the local view, so the footer can show
+            // it without waiting for the RPC round-trip. A plain unwatch carries
+            // no reason — nothing is merged, and the status re-check below
+            // clears the local entry.
             void refreshStatus(sessionID)
-          } else if (
-            state === "watching" ||
-            state === "confirming" ||
-            state === "paused" ||
-            state === "done"
-          ) {
-            // Per-session store: events for any watched session update only
-            // that session's entry — no cross-session overwrite. Merge with
-            // the existing entry so `since` (watch start) and lastInjectedAt
-            // survive — the RPC event only carries sessionID/state/injections,
-            // and dropping `since` would freeze the sidebar ⏱ to "⏱ …" (H1).
-            const current = statusOf(sessionID)
-            updateStatus(sessionID, {
-              ...(current ?? {}),
-              sessionID,
-              state,
-              injections,
-              ...(typeof totalInjections === "number" ? { totalInjections } : {}),
-              ...(typeof rejections === "number" ? { rejections } : {}),
-              ...(typeof verifying === "boolean" ? { verifying } : {}),
-              ...(typeof toolFailureCount === "number" ? { toolFailureCount } : {}),
-              // A live / done round carries no stop reason — drop any stale
-              // one left over from an earlier stopped round.
-              stopReason: undefined,
-            })
           }
         })
         if (typeof unsubscribe === "function") stopEvents = unsubscribe

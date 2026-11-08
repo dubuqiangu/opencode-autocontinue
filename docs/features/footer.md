@@ -11,7 +11,7 @@
 | 值守中 | `[AC ●]` | 当前会话已 `/autocontinue on`，正在值守 |
 | 已完成 | `[AC ✓]` | 助手消息命中完成标记，已停止续跑 |
 | 已暂停 | `[AC ⏸]` | 模型输出 `<loop-pause>…</loop-pause>`，暂停等待用户补充（用户新消息后恢复）。**`⏸` 是暂停，不是停止** |
-| 已停止 | `[AC ⏹ N]` | 达最大续跑次数 / 时段窗口关闭 / 墙钟超时 / 验证上限 / 中止等护栏触发，N = 已续跑次数 |
+| 已停止 | `[AC ⏹ N]` | 达最大续跑次数 / 时段窗口关闭 / 墙钟超时 / 验证上限 / 中止等护栏触发，或会话标题命中排除关键词，N = 已续跑次数 |
 | 已停止（带原因） | `[AC ⏹ N · <phrase>]` | 同上，且该停止路径带有 `stopReason`，`·` 后跟人类可读的英文短语 |
 
 未值守的会话不渲染任何 footer 指示（返回 null，不占位）。
@@ -45,6 +45,8 @@
 | 值守中（附加行，仅有值时） | `🔍 verifying` / `🚫 N rejection(s)` / `🛠 N tool failure(s)` | 验证命令运行中 / 本轮验证被拒次数 / 启用 `observeToolFailures` 时的工具失败观测计数 |
 | 终态 / 未值守 | 不渲染（返回 null，不占位） | `done` / `stopped` / `paused`，或未 `/autocontinue on` |
 
+- **两处注入计数口径不同，别直接比对**：侧栏 `🔄` 的主数字是**生命周期累计**（`totalInjections`，自该会话首次值守起累计），括号里的 `M this round` 才是本轮数；而 `/autocontinue status` 的 toast 只显示**本轮**注入数（`injections`）。所以一个会话值守过几轮后，侧栏主数字会大于 status toast 里的数字——这是口径差异，不是显示错误。
+
 - 全英文标签（图标 + 英文单词），与 usage-meter 右侧栏风格一致
 - 注入计数用 **🔄**（U+1F504），不是 🔁
 - `⏱` 时长每 1s 刷新（状态为 `watching` / `confirming` 时跑定时器）
@@ -61,4 +63,4 @@
 ## 配套反馈
 
 - 开启/关闭/续跑注入/停止/出错时 toast 提示（全英文，标题固定为 `Autocontinue`）：开启 `Watch enabled (watching)`、关闭 `Watch disabled`
-- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N injection(s)`（stopped 轮追加 ` · <phrase>`）或 `Not watching`
+- `/autocontinue status` 直接读 RPC 结果（不经可能过期的信号），显示 `Watching · <state> · N injections`（计数为 1 时显示 `1 injection`；stopped 轮追加 ` · <phrase>`）或 `Not watching`

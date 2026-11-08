@@ -46,7 +46,15 @@ export function sessionIDFromMessageInfo(info: Record<string, unknown> | undefin
 export function errorToMatchString(error: unknown): string {
   if (!error || typeof error !== "object") return String(error ?? "")
   const err = error as Record<string, unknown>
-  const name = typeof err.name === "string" ? err.name : ""
+  // The host labels a failure with "name" on the message-event path and with
+  // "type" on the retry-hook path. Fall back to "type" so the same underlying
+  // failure yields the same match string on both paths.
+  const name =
+    typeof err.name === "string" && err.name
+      ? err.name
+      : typeof err.type === "string"
+        ? err.type
+        : ""
   const dataMessage = (err.data as Record<string, unknown> | undefined)?.message
   const message =
     (typeof dataMessage === "string" ? dataMessage : null) ??
@@ -66,10 +74,15 @@ export function isRetryableError(
   excludePatterns: string[],
 ): boolean {
   const matchString = errorToMatchString(error).toLowerCase()
+  // Blank entries are skipped: "" is a substring of every string, so an empty
+  // exclude would block every retry and an empty pattern would retry every
+  // error. The config loader already drops them; this is the last defense.
   for (const exclude of excludePatterns) {
+    if (!exclude) continue
     if (matchString.includes(exclude.toLowerCase())) return false
   }
   for (const pattern of errorPatterns) {
+    if (!pattern) continue
     if (matchString.includes(pattern.toLowerCase())) return true
   }
   return false
@@ -183,5 +196,7 @@ export function looksIncomplete(text: string, parts: unknown, toolStaleMs = 60_0
 export function titleExcluded(title: string | undefined, excludeKeywords: string[]): boolean {
   if (!title || excludeKeywords.length === 0) return false
   const lowered = title.toLowerCase()
-  return excludeKeywords.some((keyword) => lowered.includes(keyword.toLowerCase()))
+  // Blank keywords are skipped: "" is contained in every title, so an empty
+  // keyword would exclude every session.
+  return excludeKeywords.some((keyword) => keyword.length > 0 && lowered.includes(keyword.toLowerCase()))
 }

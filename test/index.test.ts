@@ -13,10 +13,13 @@
 // Two isolation concerns:
 //
 //  1. loadConfig() reads the GLOBAL config from the user's home directory
-//     (~/.config/opencode/opencode-autocontinue.jsonc). Every test points the
-//     home directory at a throwaway temp dir (os.homedir() honours USERPROFILE
-//     on Windows and HOME on POSIX) so the developer's real config — which
-//     carries an endTime window — cannot influence the result.
+//     (~/.config/opencode/opencode-autocontinue.jsonc) unless a path is
+//     injected. Every test injects a per-host global config path that points
+//     at a NON-EXISTENT file inside a throwaway temp dir, so the developer's
+//     real config — which carries an endTime window — cannot influence the
+//     result. The injection point is setup()'s second argument
+//     ({ globalConfigPath }); the home-directory environment variables are
+//     never touched, so parallel test files cannot pollute each other.
 //
 //  2. The engine built inside setup() owns timers. setup() returns a cleanup
 //     function that disposes them; every test calls it (the afterEach hook
@@ -36,17 +39,11 @@ import { AUTOCONTINUE_RPC_CONTRACT, AUTOCONTINUE_RPC_ID } from "../src/rpc.ts"
 import type { EventLike } from "../src/events.ts"
 import { FakeStorage, makeFakeSession } from "./support/harness.ts"
 
-const originalUserProfile = process.env.USERPROFILE
-const originalHome = process.env.HOME
 const originalAutocontinueSwitch = process.env.OC_AUTOCONTINUE
 const temporaryDirectories: string[] = []
 const pendingCleanups: Array<() => Promise<void>> = []
 
 afterEach(async () => {
-  if (originalUserProfile === undefined) delete process.env.USERPROFILE
-  else process.env.USERPROFILE = originalUserProfile
-  if (originalHome === undefined) delete process.env.HOME
-  else process.env.HOME = originalHome
   if (originalAutocontinueSwitch === undefined) delete process.env.OC_AUTOCONTINUE
   else process.env.OC_AUTOCONTINUE = originalAutocontinueSwitch
 
@@ -82,6 +79,9 @@ interface FakeHost {
   contract: unknown
   /** Whether the RPC registration was disposed. */
   rpcDisposed: boolean
+  /** The global config path injected into setup(): a non-existent file inside
+   *  a throwaway temp dir, so the real user config is never read. */
+  globalConfigPath: string
 }
 
 /** A controllable host event stream that honours the abort signal. */
@@ -136,16 +136,14 @@ class FakeEventStream {
 }
 
 /**
- * Build a fake host with an isolated home directory and a project config that
- * makes the timing deterministic (no keep-alive interval, no injection cap, no
- * wall-clock budget, a 10ms idle delay).
+ * Build a fake host with an isolated global config path and a project config
+ * that makes the timing deterministic (no keep-alive interval, no injection
+ * cap, no wall-clock budget, a 10ms idle delay).
  */
 function createFakeHost(): FakeHost {
-  const homeDirectory = mkdtempSync(join(tmpdir(), "opencode-autocontinue-home-"))
+  const globalConfigDirectory = mkdtempSync(join(tmpdir(), "opencode-autocontinue-global-"))
   const projectDirectory = mkdtempSync(join(tmpdir(), "opencode-autocontinue-project-"))
-  temporaryDirectories.push(homeDirectory, projectDirectory)
-  process.env.USERPROFILE = homeDirectory
-  process.env.HOME = homeDirectory
+  temporaryDirectories.push(globalConfigDirectory, projectDirectory)
   delete process.env.OC_AUTOCONTINUE
 
   mkdirSync(join(projectDirectory, ".opencode"), { recursive: true })
@@ -171,6 +169,8 @@ function createFakeHost(): FakeHost {
     implementation: {},
     contract: undefined,
     rpcDisposed: false,
+    // The file does not exist: the global config is unreadable on purpose.
+    globalConfigPath: join(globalConfigDirectory, "opencode-autocontinue.jsonc"),
   }
 
   const session = makeFakeSession()
@@ -203,7 +203,7 @@ function createFakeHost(): FakeHost {
 
 /** Run setup() with the fake host and register the returned cleanup. */
 async function startPlugin(host: FakeHost): Promise<() => Promise<void>> {
-  const cleanup = await setup(host.ctx)
+  const cleanup = await setup(host.ctx, { globalConfigPath: host.globalConfigPath })
   pendingCleanups.push(cleanup)
   return cleanup
 }
@@ -351,7 +351,7 @@ test("setup is a no-op when OC_AUTOCONTINUE is 0", async () => {
   const host = createFakeHost()
   process.env.OC_AUTOCONTINUE = "0"
 
-  const cleanup = await setup(host.ctx)
+  const cleanup = await setup(host.ctx, { globalConfigPath: host.globalConfigPath })
   pendingCleanups.push(cleanup)
 
   assert.equal(host.contract, undefined, "the RPC contract must not be registered when the plugin is disabled")

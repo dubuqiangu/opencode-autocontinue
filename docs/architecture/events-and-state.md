@@ -9,7 +9,7 @@
 | `ctx.event.subscribe({signal})` | 事件流订阅（server 侧） | herdr-agent-state |
 | `ctx.storage.get/set(key, val)` | 值守名单持久化 | CodeNomad、OrbitStart、finchtoys |
 | `ctx.rpc.register(contract, impl)` | RPC 注册（server↔TUI） | dynamic-context-pruning |
-| `session.status` | 跟踪 busy/idle，防在运行中注入 | herdr-agent-state |
+| `session.status`（事件，非轮询） | 事件驱动派生 busy/active，防在运行中注入 | herdr-agent-state |
 | `session.error` | 会话级错误（含 provider error）→ 记 pendingContinue | herdr-agent-state |
 | `session.idle` | 空闲（阶段完成/停摆）→ 触发续跑判定 | herdr-agent-state |
 | `session.deleted` | 清理会话状态 | herdr-agent-state |
@@ -20,7 +20,7 @@
 ## 事件解析（src/events.ts）
 
 - `sessionIDFromEvent` 双兼容：V2 事件 `event.sessionID` 平铺 / 嵌套兼容
-- error 提取：从 `session.error` / assistant 消息错误载荷取错误文本，归一为 `name: message (status: N)`（status 存在时拼入，纯 5xx 裸状态也能匹配 `errorPatterns`）
+- error 提取：从 `session.error` / assistant 消息错误载荷取错误文本，归一为 `name: message (status: N)`（status 存在时拼入，纯 5xx 裸状态也能匹配 `errorPatterns`）。**retry hook 路径与消息事件路径现在共用同一个归一化函数**（`errorToMatchString`）：宿主在 retry hook 上给的是 `type` 而非 `name`，归一化会回退读 `type`，因此同一个失败在两条路径上产出同一个匹配串，`errorPatterns` 不会再一边命中一边失配
 - 完成标记正则：编译 `completionMarkers` 或 `markerRegex`，匹配 assistant 文本；**空 `completionMarkers` 返回 null matcher**（不检测完成，会话持续值守）
 - 哨兵匹配：`matchSentinel(text, tag)` 对 tag 做正则转义后构造成对标签 `<tag>…</tag>`（非空夹注，大小写敏感），返回夹注内容；空 tag 返回 `undefined`
 
@@ -41,7 +41,7 @@ server storage（`ctx.storage.set/get`，跨重启）：
       "roundSince": 1730000000000,
       "lastInjectedAt": 1730000060000,
       "state": "watching|confirming|stopped|paused|done",
-      "stopReason": "window-closed|watch-timeout|injection-cap|verify-limit|idle-interrupted|user-interrupted|abort-sentinel"
+      "stopReason": "window-closed|watch-timeout|injection-cap|verify-limit|idle-interrupted|user-interrupted|abort-sentinel|title-excluded"
     }
   }
 }
@@ -52,7 +52,7 @@ server storage（`ctx.storage.set/get`，跨重启）：
 - `rejections` 本轮验证失败次数；`roundId` 轮次标识（`resume()` +1，用于丢弃陈旧验证结果）。旧字段 `consecutive` 已于 v0.3.0 移除
 - `roundSince` 本轮时间锚点（epoch 毫秒）：按轮次计量的墙钟预算基准，由 `watch()` 置位，真实用户消息开启新一轮时刷新（此时 `since` 保持不变）；hydrate 旧数据时该字段缺失则回退到 `since`。属内部字段，不通过 `status()` / `list()` 对外暴露
 - `state` 联合 `watching | confirming | stopped | paused | done`；hydrate 保留 `paused`（等待用户输入的活动值守），丢弃终态 `done` / `stopped`
-- `stopReason` 停止原因（**可选**）：**仅 `stopped` 行存在**，取值 `window-closed`（值守窗口到点）/ `watch-timeout`（墙钟上限）/ `injection-cap`（注入次数上限）/ `verify-limit`（验证失败次数上限）/ `idle-interrupted`（空闲轮被中断）/ `user-interrupted`（用户主动中止）/ `abort-sentinel`（模型输出 abort 哨兵）；其余状态不带此字段。护栏停止一律记为 `stopped`，绝不记为 `done`（v0.5.2）
+- `stopReason` 停止原因（**可选**）：**仅 `stopped` 行存在**，共 **8 个**取值——`window-closed`（值守窗口到点）/ `watch-timeout`（墙钟上限）/ `injection-cap`（注入次数上限）/ `verify-limit`（验证失败次数上限）/ `idle-interrupted`（空闲轮被中断）/ `user-interrupted`（用户主动中止）/ `abort-sentinel`（模型输出 abort 哨兵）/ `title-excluded`（会话标题命中排除关键词，v0.5.3 起带原因）；其余状态不带此字段。护栏停止一律记为 `stopped`，绝不记为 `done`（v0.5.2）
 - 内存态另含 `inFlight` / `pendingContinue` / `verifying` 等锁（不持久化）
 
 > `roundId` 与 `roundSince` 的分工：`roundId` 是单调递增的轮次**标识**，用于判定验证结果是否来自已被取代的旧轮次并将其丢弃；`roundSince` 是轮次起始的**时间锚点**，用于计算按轮次的墙钟预算（`watchTimeoutMs`）。前者解决「结果是否过期」，后者解决「本轮还剩多少时间」，二者不互相替代。
@@ -68,7 +68,7 @@ stateDiagram-v2
     Confirming --> Watching: 复查回复无标记<br/>回到 watching
     Watching --> Paused: pause 哨兵<br/>等待用户新消息
     Paused --> Watching: 用户新消息 / resume()
-    Watching --> Stopped: 达 maxConsecutive / 到 endTime / off<br/>或 abort 哨兵（记录 stopReason）
+    Watching --> Stopped: 达 maxConsecutive / 到 endTime / 墙钟超时 / 验证上限<br/>标题命中排除关键词 / off / abort 哨兵（记录 stopReason）
     Stopped --> Watching: /autocontinue on
     Done --> Watching: /autocontinue on
     Watching --> [*]: /autocontinue off<br/>删除 storage 记录
@@ -94,7 +94,7 @@ sequenceDiagram
     S->>M: retry hook: 改重试+退避
     Note over S,M: 重试成功 → 无事发生
     M-->>S: 最终失败 → session.error / idle
-    S->>M: 判定通过 → session.prompt(续跑消息)
+    S->>M: 判定通过 → session.synthetic(续跑消息)<br/>宿主不支持时回退 session.prompt
     M-->>S: agent 输出完成标记
     S-->>TUI: state.changed(done)
     TUI-->>U: footer [AC ✓]
@@ -104,4 +104,4 @@ sequenceDiagram
 
 - **单实例续跑**：同一会话同一时刻只允许一个在途注入（`inFlight` 锁）
 - **双事件防重**：`session.error` 与 `message.updated(error)` 可能同时来，用 `pendingContinue` 去重，只在 idle 时统一发送
-- **不打断运行中会话**：`session.status` 非 idle 时绝不注入，轮询等待
+- **不打断运行中会话**：忙/活跃状态**由事件派生**（`session.status` / `session.execution.*` / `session.step.*` 事件 → `lastBusyAt` / `lastActiveAt`），**不轮询**；判定为忙时绝不注入

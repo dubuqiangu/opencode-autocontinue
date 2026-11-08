@@ -4,15 +4,16 @@
 
 ## 1. 前置要求
 
-开始之前，先确认下面 5 条都满足：
+开始之前，先确认下面 6 条都满足：
 
 | # | 要求 | 怎么确认 |
 |---|---|---|
 | 1 | **OpenCode ≥ V2** | 插件依赖 V2 的 TUI 插件接口与 RPC 事件，V1 不支持 |
 | 2 | **`opencode` 命令在 PATH 里** | 终端执行 `opencode --version` 能打印版本号 |
-| 3 | **能访问 GitHub** | 安装源是 GitHub 上的公开仓库 |
-| 4 | **按用户全局安装** | 插件装在你的用户目录下，**不会**往你的项目仓库里写任何文件；卸载同样只清理用户目录 |
-| 5 | **插件只监听你主动开启的会话** | 装好后不会自动接管任何会话，必须在具体会话里执行 `/autocontinue on` 才开始值守 |
+| 3 | **已完成 opencode 登录** | **未登录时插件不会出现在 `opencode plugin list` 里**——先完成登录，再安装 |
+| 4 | **能访问 GitHub** | 安装源是 GitHub 上的公开仓库 |
+| 5 | **按用户全局安装** | 插件装在你的用户目录下，**不会**往你的项目仓库里写任何文件；卸载同样只清理用户目录 |
+| 6 | **插件只监听你主动开启的会话** | 装好后不会自动接管任何会话，必须在具体会话里执行 `/autocontinue on` 才开始值守 |
 
 ## 2. 一键安装
 
@@ -43,10 +44,21 @@ opencode service restart
 - [ ] 重启 TUI 后，在会话内输入 `/autocontinue on`，右下角弹出 toast **`Watch enabled (watching)`**
 - [ ] 同一会话底部状态行出现 **`[AC ●]`**
 - [ ] 右侧栏出现 `Watch` 块，`⏱` 后面的时长在走动
-- [ ] 会话内输入 `/autocontinue status`，toast 显示 **`Watching · watching · 0 injections`**
+- [ ] 会话内输入 `/autocontinue status`，toast 显示 **`Watching · watching · 0 injections`**（字段含义：**会话名 · 状态 · 本次会话注入次数**）
 - [ ] 输入 `/autocontinue off`，toast 显示 **`Watch disabled`**，footer 的 `[AC ●]` 与右侧栏 `Watch` 块同时消失
 
-### 3.3 开发者验证（可选）
+### 3.3 30 秒最小可复现场景
+
+只想确认「插件真的在干活」，按这四步走一遍：
+
+1. **新建一个会话**——标题避开 `测试` 等默认排除词。
+2. **问一个会产生工具调用的问题**，例如「读一下当前目录下的 README 并总结要点」。
+3. **什么都不做**——模型报错、工具失败或阶段空转时，插件会自动注入续跑消息。
+4. **看注入计数**：右侧栏 `🔄 N injections`（或 `/autocontinue status` 的注入次数）应当 **+1**，footer 保持 `[AC ●]`。
+
+> 计数没涨先别急着怀疑插件：按排障 7.2 逐条排查——会话标题被排除、仍在用户宽限期（默认 15 秒）内、模型正忙、撞上护栏，这四种情况本来就不注入。
+
+### 3.4 开发者验证（可选）
 
 仓库内提供了自动化验证脚本：
 
@@ -54,7 +66,7 @@ opencode service restart
 pwsh scripts/verify-install.ps1
 ```
 
-> ⚠️ 这是**开发者工具**：要求你本地已经 clone 了本仓库、且 HEAD 已经推送到远端。普通终端用户**跑不了**，也不需要跑——请用上面 3.1 / 3.2 的手动清单。
+> ⚠️ 这是**开发者工具**：要求你本地已经 clone 了本仓库、且 HEAD 已经推送到远端。普通终端用户**跑不了**，也不需要跑——请用上面 3.1 / 3.2 / 3.3 的手动清单。
 
 ## 4. 配置
 
@@ -66,6 +78,8 @@ pwsh scripts/verify-install.ps1
 | 项目覆盖 | 仓库内 `.opencode/opencode-autocontinue.jsonc` | 仓库内 `.opencode/opencode-autocontinue.jsonc` |
 
 > Windows 列为 **PowerShell 写法**（可直接粘贴到 PowerShell）；cmd 下请写用户目录的绝对路径。
+
+Windows 上全局配置的实际展开路径是 `C:\Users\<用户名>\.config\opencode\opencode-autocontinue.jsonc`（`<用户名>` 替换成你的 Windows 用户名），与上表的 `$env:USERPROFILE\.config\opencode\opencode-autocontinue.jsonc` 指向同一个文件。
 
 - 两层配置 **deep merge**，**项目级优先**。
 - 项目级路径里的 `.opencode` 是**仓库根目录下的 `.opencode`**，不是用户目录里的那个。
@@ -103,6 +117,12 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue
 
 卸载后插件不会残留任何定时器或事件订阅。若要连配置一起清掉，手动删除全局配置文件 `$env:USERPROFILE\.config\opencode\opencode-autocontinue.jsonc`（PowerShell 写法；Unix：`~/.config/opencode/opencode-autocontinue.jsonc`）。
 
+**值守名单（持久化存储）**：值守中的会话列表保存在宿主存储键 **`opencode-autocontinue.watched`** 下，跨重启保留。
+
+> ⚠️ `opencode plugin remove` **是否会一并清理该存储键，尚未在真机验证**——项目至今没有实测过卸载后的残留行为，这里不作断言。
+
+**卸载后重装请一并检查**：重装并重启 TUI 后，确认之前值守过的会话没有自动恢复成「值守中」（若 footer 仍显示 `[AC ●]`，说明该键有残留，需要手动清理宿主存储中的 `opencode-autocontinue.watched`）。
+
 ## 7. 排障
 
 ### 7.1 `/autocontinue` 不在命令面板里
@@ -110,7 +130,7 @@ opencode plugin remove github:dubuqiangu/opencode-autocontinue
 按顺序排查：
 
 1. 执行 `opencode plugin list`，看有没有 `autocontinue <commit>`。
-2. **没有** → 插件没装上，重新执行 `opencode plugin add github:dubuqiangu/opencode-autocontinue`。
+2. **没有** → 插件没装上，或 opencode 尚未登录（未登录时插件不会出现在列表里）。确认已登录后重新执行 `opencode plugin add github:dubuqiangu/opencode-autocontinue`。
 3. **有，但命令不在面板里** → 多半是**装完没重启**。完整重启 opencode（`/reload` 不算）。
 4. **重启后还是没有** → 打开日志找插件加载错误（路径见 7.5）。
 

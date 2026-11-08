@@ -2,6 +2,7 @@
 // Wires config, watch store, engine, RPC, and event subscription.
 
 import { loadConfig } from "./config.ts"
+import type { LoadConfigOptions } from "./config.ts"
 import { WatchStore } from "./state.ts"
 import { AutocontinueEngine, computeEndAt } from "./engine.ts"
 import type { EventLike } from "./events.ts"
@@ -49,12 +50,18 @@ interface ServerContext {
 
 export const id = AUTOCONTINUE_RPC_ID
 
-export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
+export async function setup(
+  ctx: ServerContext,
+  configOptions: LoadConfigOptions = {},
+): Promise<() => Promise<void>> {
   if (process.env.OC_AUTOCONTINUE === "0") {
     return async () => {}
   }
 
-  const config = () => loadConfig(ctx.location?.directory)
+  // The global config path can be injected by tests and tooling so they never
+  // have to rewrite the process environment (USERPROFILE / HOME) to stay
+  // isolated from the developer's real configuration.
+  const config = () => loadConfig(ctx.location?.directory, configOptions)
   const store = new WatchStore(ctx.storage)
   await store.hydrate()
 
@@ -83,7 +90,13 @@ export async function setup(ctx: ServerContext): Promise<() => Promise<void>> {
   const rpcImplementation = {
     async set(input: { sessionID: string; enabled: boolean }) {
       if (input.enabled) {
-        await store.watch(input.sessionID, config().endTime ? computeEndAt(config().endTime, config().startTime) : 0)
+        // Read the config ONCE: every read hits the disk, and the window
+        // computation must see one consistent snapshot.
+        const pluginConfig = config()
+        const endAt = pluginConfig.endTime
+          ? computeEndAt(pluginConfig.endTime, pluginConfig.startTime)
+          : 0
+        await store.watch(input.sessionID, endAt)
         engine.scheduleInterval(input.sessionID)
       } else {
         // B-4: abort a running verification BEFORE unwatch() deletes the memory

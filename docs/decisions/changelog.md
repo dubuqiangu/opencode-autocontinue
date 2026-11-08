@@ -8,9 +8,10 @@
 
 | 版本 | 日期 | 一句话摘要 |
 |---|---|---|
+| v0.5.5 | 2026-11-08 | 配置解析与诊断加固、错误匹配串统一、回声幂等与时间窗兜底、`roundId` 全局单调、在途锁与每轮缓存拆分、disposed 守卫、final-check 复检、定时器钳制、TUI 纯逻辑抽离、验证进程终止修复、脱敏扫描器扩充 |
 | v0.5.4 | 2026-11-08 | 全局配置路径可注入（`loadConfig` 新增可选参数）、测试夹具去重（统一到 `test/support/harness.ts`）、测试解除文案硬编码 |
 | v0.5.3 | 2026-11-07 | `maxConsecutive` 负值回退默认、墙钟预算按轮次计量、新增第 8 个停止原因、停止原因单一真源、测试自行退出、文档分层校正 |
-| v0.5.2 | 2026-11-02 | 借鉴裁定记录、挫败感触发（opt-in）、无人值守护栏与默认上界、七值 `stopReason` |
+| v0.5.2 | 2026-11-02 | 借鉴裁定记录、挫败感触发（opt-in）、无人值守护栏与默认上界、七值 `stopReason`（v0.5.3 补第 8 值后为 8 值） |
 | v0.5.1 | 2026-11-01 | 全项目审计修复：跨午夜起点闸、验证 TOCTOU、非有限数值、JSONC 尾逗号、哨兵优先级等 |
 | v0.5.0 | 2026-11-01 | 验证输出限流、abort/pause 哨兵与 `paused` 状态、压力梯替代 `escalationMessages`、验证状态进 TUI/RPC、工具失败观测 |
 | v0.4.0 | 2026-10-31 | 注入溯源修复、验证驱动续跑 Loop（opt-in）、终止哨兵 |
@@ -41,6 +42,133 @@
 
 ---
 
+## v0.5.5
+
+日期：2026-11-08
+
+本轮是 v0.5.4 之上的**加固轮**：配置解析与诊断、护栏与生命周期、TUI 状态指示、
+验证进程终止、脱敏扫描器五个方向。用户可见的变化集中在「配置写错时不再静默」
+与「值守状态不再被误清」两处。
+
+### 新增
+
+**① 配置诊断日志（`src/config.ts`）**
+
+- 配置文件**不存在**属正常路径，**静默**回退默认值。
+- 配置文件**读取失败**（权限、路径被目录占位、I/O 错误）或**解析失败**时，输出**一条**
+  `console.error`，内容含**配置文件的绝对路径与错误信息**，随后回退默认值——
+  不再出现「配置写错了却毫无提示」。
+
+**② 配置值的校验与告警（`src/config.ts`）**
+
+- **JSONC 尾逗号前瞻跳过注释**：`1, // 说明\n}` 这类写法不再被当成语法错误。
+- **数组型配置键剔除空字符串**：`completionMarkers` / `errorPatterns` / `excludePatterns` /
+  `excludeTitleKeywords` / `escalationPressureLadder` / `frustrationTriggers` 共 **6 个**数组键
+  统一剔除空串——空串是任何字符串的子串，留着会让匹配器命中一切。
+- **`markerRegex` 防护**：源长度上限 1024；检测到**嵌套量词**（ReDoS 风险）直接忽略；
+  同时校验正则**可编译**。非法值一律**忽略并告警**，行为回落到 `completionMarkers`。
+- **`startTime` / `endTime` 校验 `HH:MM`**（时 ≤ 23、分 ≤ 59），非法值**回退为空**
+  （= 不限制每日窗口）并告警。
+- **数值钳制**：`idleDelayMs` / `minIntervalMs` / `userGraceMs` 的**负值钳到 0**；
+  `intervalMs` / `idleDelayMs` / `minIntervalMs` 超过 `2^31-1` 时**钳到上限并告警**。
+- 所有告警走 `console.error`（输出到 stderr / 宿主日志），**不是静默丢弃**。
+
+**③ TUI 纯逻辑抽离（`src/tui-logic.ts`，新建）**
+
+- 停止原因文案表、时长格式化、watch 状态合并三块**纯逻辑**从 `src/tui.tsx` 抽出到
+  新建的 `src/tui-logic.ts`，可直接单测，不再需要从 `.tsx` 源码里刮表。
+
+### 修复
+
+**④ 错误匹配串统一（`src/events.ts`）**
+
+- 错误事件的匹配串在 `name` 缺失时**回退读 `type`**——retry hook 路径与消息事件路径从此
+  产出**同一个**匹配串，不再出现「同一类错误在两条路径上分类不同」。
+- 空串的 pattern / exclude / 标题关键词一律**跳过**。
+
+**⑤ 回声幂等（`src/engine.ts`）**
+
+- 同一条注入被宿主以**两种事件形状**各投递一次时，此前**第二次**投递会被当成真实用户消息，
+  触发 `resume()` 并**清零注入上限 / 验证失败计数 / 轮次墙钟三重上界**——护栏形同失效。
+- 现在注入记录在整个 `selfEchoWindowMs` 窗口内保持有效，第二次投递同样被识别为自身回声。
+
+**⑥ 回声时间窗兜底（`src/engine.ts`）**
+
+- 入站文本**提取不到**且在 `selfEchoWindowMs` 窗口内确有自注入记录时，判定为自身回声
+  （此前文档已承诺、代码里不存在的行为，现已补上）。
+- **残留风险**：真实用户消息若在窗口内且宿主不提供可提取文本，会被判为回声而**未被处理**——
+  已记入 `docs/decisions/known-issues.md`，本版不修。
+
+**⑦ `roundId` 改为进程级全局单调递增（`src/state.ts`）**
+
+- 此前 `roundId` 从 0 重新开始，off → on 之后**陈旧的验证结果**可能被当成新一轮的结果。
+- 现在由进程级计数器统一分配，任何时候开启的新一轮都拿到更大的轮号。
+
+**⑧ 在途注入锁与每轮缓存拆分（`src/state.ts`）**
+
+- `watch()` 重置**每轮缓存**但**不清除在途注入锁**；`unwatch()` 两者都清。
+- 此前两者混在一起，重开值守可能让仍在途的注入失去互斥保护。
+
+**⑨ 引擎 disposed 守卫（`src/engine.ts`）**
+
+- 引擎 disposed 后**不再新建定时器**、**不再改写持久化状态**，避免卸载后仍有副作用。
+
+**⑩ final-check 复检（`src/engine.ts`）**
+
+- 完成复查轮的注入在 await 之后会**复检会话是否仍被值守**，避免用户在这段窗口内关闭值守
+  后仍发生注入。
+
+**⑪ 定时器延迟钳制（`src/engine.ts`）**
+
+- 引擎排出的**每个**定时器延迟都钳到 `2^31-1`；超限值此前会退化成 1ms 热循环。
+
+**⑫ 配置读取位置前移（`src/engine.ts`）**
+
+- 非值守会话的事件**不再白读两次盘**；回声判断复用**已加载**的配置。
+
+**⑬ TUI 状态指示保留（`src/tui.tsx`）**
+
+- 查询 watch 状态失败时**保留**原有指示——此前会误删「正在值守」的显示；
+  现在**仅当**服务端明确回答「未在值守」时才移除条目。
+
+**⑭ 验证进程终止的未捕获异常（`src/verify.ts`）**
+
+- Windows 进程树终止助手补上 **spawn 失败监听**：此前异步失败会变成**未捕获异常**，
+  可能带崩宿主进程。
+
+**⑮ 脱敏扫描器扩充（`scripts/sanitize-scan.ts`）**
+
+- 扫描规则扩充为 **12 条模式**；修正了 **Telegram token** 的匹配形状（此前带描述文字前缀，
+  导致真实 token 永远匹配不到）；补充**本机用户名**与 `/home/<用户名>` 形态；产物文件按形态识别。
+
+**⑯ 测试配置隔离落地（`test/index.test.ts`）**
+
+- v0.5.4 引入的 `LoadConfigOptions.globalConfigPath` 注入点此前只有配置加载用例在用；
+  本轮 `test/index.test.ts` 也改为经 `setup()` 的注入参数指向临时目录，
+  **不再改写 `USERPROFILE` / `HOME` 这类进程级环境变量**——同进程并行跑测试时不再互相污染。
+
+### 验证
+
+- **补测**：本轮改动对应的用例已补强（配置解析与校验、错误匹配串、回声判定、
+  轮号与锁拆分、disposed 守卫、final-check 复检、定时器钳制、TUI 纯逻辑）。
+- **命名**：`src/engine.ts` 内的局部变量 `cfg` 统一改名为 `pluginConfig`（纯机械、可读性）。
+- **文档同步**：`docs/architecture/{loop-mechanisms,provenance-and-loop,loop-evidence}.md`、
+  `docs/decisions/{known-issues,roadmap,changelog}.md`、`docs/features/{config,engine}.md`。
+
+### 本版**没有**做的事
+
+- **存储多实例丢行未修**：值守列表仍按单一存储键 `opencode-autocontinue.watched` 保存，
+  多个实例并发写会互相覆盖丢行。按会话分键属于**破坏性存储布局变更**，需另给迁移与
+  向后兼容方案，本版**不修**，留待后续版本决策（已记入 `docs/decisions/known-issues.md`）。
+- **回声时间窗兜底的残留风险未消除**：真实用户消息在窗口内且宿主不提供可提取文本时，
+  仍会被判为回声而未被处理。
+- **三项实机验证仍未做**：跨午夜时间窗口语义、验证流程的 TOCTOU 竞态、
+  `stopReason` 在 footer 与 toast 中的实际渲染。
+- **v0.5.4 记录的「测试解除文案硬编码」只完成了一部分**：默认续跑消息与 `finalCheckMessage`
+  的中文文案前缀仍以字面量出现在断言里，本版**未补完**。
+
+---
+
 ## v0.5.4
 
 日期：2026-11-08
@@ -66,10 +194,13 @@
   统一改用共享夹具 `test/support/harness.ts`。
 - 仓库内不再有第二份实现。
 
-**③ 测试解除文案硬编码**
+**③ 测试解除文案硬编码（部分完成）**
 
 - 原断言把默认续跑消息的中文文案写死在测试里，改文案就会让测试无故失败。
-- 改为与配置常量比对：断言的是**行为**（注入的就是配置的那条消息），而不是文案本身。
+- 部分断言改为与配置常量比对：断言的是**行为**（注入的就是配置的那条消息），而不是文案本身。
+- **残留**：默认续跑消息与 `finalCheckMessage` 的中文文案前缀仍以字面量出现在断言里
+  （例如注入文本匹配 `/^继续执行/`、`DEFAULT_CONFIG.finalCheckMessage` 匹配 `/整体检查/`），
+  改文案仍会让这些用例无故失败——**本版未做完**，该残留至 v0.5.5 仍未补齐。
 
 ### 验证
 
@@ -381,7 +512,7 @@
 
 ### 修复
 
-- **折叠状态被宿主重挂载重置**——`isCollapsed` 原声明在 `SidebarStatus` 组件体内（tui.tsx:260），而宿主会频繁重挂载侧栏 slot——本仓库自身注释明说 "the host may re-mount the sidebar often"，usage-meter 也因此在 v0.7.13 把折叠状态持久化到 settings store（其注释："another instance flipped it ... otherwise a click after a cross-instance takeover would write the store value back unchanged"）。每次宿主重挂载 → 组件体重跑 → `createSignal(false)` 新建 → 点击折叠被下次挂载立即重置，功能表现如同失效。
+- **折叠状态被宿主重挂载重置**——`isCollapsed` 原声明在 `SidebarStatus` 组件体内（`src/tui.tsx`），而宿主会频繁重挂载侧栏 slot——本仓库自身注释明说 "the host may re-mount the sidebar often"，usage-meter 也因此在 v0.7.13 把折叠状态持久化到 settings store（其注释："another instance flipped it ... otherwise a click after a cross-instance takeover would write the store value back unchanged"）。每次宿主重挂载 → 组件体重跑 → `createSignal(false)` 新建 → 点击折叠被下次挂载立即重置，功能表现如同失效。
   - 修复：`isCollapsed` / `setIsCollapsed` 提升到 **setup 作用域**（与 `statusStore` / `lastSlotSessionID` 同级，跨挂载存活），组件体内重复声明删除。
 
 ### 新增

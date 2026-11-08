@@ -13,12 +13,17 @@
 
 - 两层配置 **deep merge**，**项目级优先**（项目级同名字段覆盖全局，全局其余字段保留）。
 - 项目级路径指的是**仓库根目录下的 `.opencode`**，不是用户目录里的那个。
+- 合并顺序是「**默认 → 全局 → 项目**」，故项目级覆盖全局、全局覆盖出厂默认。
 
 ### 三步创建配置
 
 1. **创建文件**：在上面的路径新建 `opencode-autocontinue.jsonc`（全局文件要先建 `opencode` 目录；项目文件要先建 `.opencode` 目录）。
 2. **粘贴**：把下面「完整示例」或「最小示例」的内容粘进去（JSONC，允许注释和尾逗号）。
 3. **重启**：**改完配置必须完整重启 opencode**（`opencode service restart` 或退出重开）才会生效——`/reload` 不会重载插件配置。
+
+> **v0.5.3 / v0.5.4 也同样需要完整重启 TUI**：`/reload` 只重载会话与界面，
+> **不会重载插件**，因此插件侧的配置读取与新增的运行时 API 都要在重启后才生效。
+> 本文档中所有版本的新配置项一律适用这条规则。
 
 最小示例：
 
@@ -45,11 +50,68 @@
 | `markerRegex` | 空 | 完全自定义完成标记正则。**若有效则取代 `completionMarkers`** |
 | `finalCheckEnabled` | `true` | 完成标记命中后，注入 `finalCheckMessage` 进入复查轮（confirming）；复查完成（再次命中标记）才 `done`。`false` = 标记命中直接 `done` |
 | `finalCheckMessage` | `请整体检查一遍项目是否存在遗漏或 bug，并同步整理项目相关文档。检查完毕确认无误后，输出完成标记。` | 复查轮注入的话术（整体检查 + 文档整理） |
-| `errorPatterns` | `["bad_response_status_code", "ECONNRESET", "timeout", ...]`（节选，完整列表见下方示例） | 视为可恢复的错误特征（大小写不敏感子串）。匹配串含 `type: message (status: N)`，纯 5xx 裸状态（如 status 503 无 message）也能命中 `"(status: 5"` / `"429"` |
+| `errorPatterns` | `["bad_response_status_code", "ECONNRESET", "timeout", ...]`（节选，完整列表见下方示例） | 视为可恢复的错误特征（大小写不敏感子串）。匹配串归一为 `name: message (status: N)`（宿主给的是 `type` 时回退读 `type`），retry hook 路径与消息事件路径**产出同一个串**，同一条 pattern 不会一边命中一边失配。纯 5xx 裸状态（如 status 503 无 message）也能命中 `"(status: 5"` / `"429"` |
 | `excludePatterns` | `["MessageAbortedError", "operation was aborted"]` | 永不自动续跑（用户主动中止） |
 | `excludeTitleKeywords` | `["测试"]` | 标题含这些词不续跑。命中时会话停止，原因 `title-excluded`（短语 `title excluded`） |
 | `userGraceMs` | `15000` | 用户最近发真实消息后 N ms 内不自动续跑 |
 | `intervalMs` | `3600000` | 周期检查间隔（ms），`0` = 关闭（正值配置下限钳制为 `1000`）。每间隔向值守中的会话触发一次统一注入判定（仅当会话空闲、模型近 60s 无 busy、未命中完成标记/复查轮外、且在值守窗口内、最后一条 assistant 消息非"疑似未完成"——提问结尾 / 工具调用在途 / 短确认回复） |
+
+## 配置校验与诊断（v0.5.5）
+
+配置写错时**不再静默**。加载器（`src/config.ts`）在读取与合并两个阶段都会做检查，
+所有告警走 `console.error`——输出到 **stderr / 宿主日志**（不是插件自己的文件），
+不写进会话。
+
+### 读取阶段
+
+| 情形 | 行为 |
+|---|---|
+| 文件**不存在** | **静默**回退默认值（正常路径，不打扰用户） |
+| 读取**失败**（权限、路径被目录占位、I/O 错误） | 输出一条 `console.error`，内容含**配置文件的绝对路径**与错误信息，随后回退默认值 |
+| **解析失败**（JSONC 语法错误） | 输出一条 `console.error`，内容含**配置文件的绝对路径**与错误信息，随后回退默认值 |
+
+### 合并阶段（逐键校验）
+
+| 键 | 非法输入 | 行为 |
+|---|---|---|
+| `startTime` / `endTime` | 不是 `HH:MM`（时 > 23 或分 > 59） | **回退为空**（= 不限制每日窗口）并告警 |
+| `markerRegex` | 源长度 > 1024 | **忽略该值**并告警（回落到 `completionMarkers`） |
+| `markerRegex` | 含**嵌套量词**（ReDoS 风险） | **忽略该值**并告警 |
+| `markerRegex` | 正则**不可编译** | **忽略该值**并告警 |
+| `completionMarkers` / `errorPatterns` / `excludePatterns` / `excludeTitleKeywords` / `escalationPressureLadder` / `frustrationTriggers` | 数组中含**空字符串** | **剔除空串**（空串是任何字符串的子串，留着会让匹配器命中一切） |
+| `idleDelayMs` / `minIntervalMs` / `userGraceMs` | 负值 | **钳到 0** |
+| `intervalMs` / `idleDelayMs` / `minIntervalMs` | 大于 `2^31-1` | **钳到 `2^31-1`** 并告警（超出定时器可表示范围） |
+| `maxConsecutive` | 负值 | **回退默认 20**（v0.5.3 起，见下） |
+
+> JSONC 解析器的**尾逗号前瞻会跳过注释**：`1, // 说明\n}` 这类写法不再被当成语法错误。
+> 既有钳制不变：`verifyTimeoutMs` 钳 `1000`..`3600000`，`verifyMaxIterations` 钳 `0`..`10000`，
+> `watchTimeoutMs` 负值钳 `0`。
+>
+> `intervalMs` 的 `0 = 关闭周期检查` 语义保持可达——1s 下限只对**正值**套用。
+
+## 配置生效顺序（注入判定链）
+
+配置项不是同时生效的：守护栏类的键在**阶段一**判定，会话状态类的键在**阶段二**判定。
+下表与 `docs/features/engine.md` 的「注入判定流程」**完全一致**。
+
+| 阶段 | 判定 | 用的配置键 | 不通过时 |
+|---|---|---|---|
+| 一 | 值守窗口 `endAt` | `startTime` / `endTime` | 未到点 → **跳过本轮**；到点 → **停止**（`window-closed`） |
+| 一 | 墙钟预算 | `watchTimeoutMs` | 用尽 → **停止**（`watch-timeout`） |
+| 一 | 注入上限 | `maxConsecutive` | 达到 → **停止**（`injection-cap`） |
+| 二 | 用户安静期 | `userGraceMs` | 不足 → **跳过本轮** |
+| 二 | 标题排除 | `excludeTitleKeywords` | 命中 → **停止**（`title-excluded`） |
+| 二 | 会话近期活跃 | `idleDelayMs` | 活跃中 → **跳过本轮** |
+| 二 | 注入节流 | `minIntervalMs` | 节流中 → **跳过本轮**（到点再判定） |
+| 三 | 完成标记 | `completionMarkers` / `markerRegex` / `finalCheckEnabled` / `finalCheckMessage` | 命中 → 进入完成流程 |
+| 三 | 验证门控 | `verifyCommand` / `verifyTimeoutMs` / `verifyMaxIterations` / `verifyCwd` | 不通过 → 注入升级提示续跑 |
+| 三 | 升级提示 | `escalationPressureLadder` / `escalationReassessMessage` / `escalationRootCauseMessage` | 按拒绝数选档追加 |
+| 三 | 哨兵 | `abortSentinelTag` / `pauseSentinelTag` | 命中 → **停止** / `paused` |
+| 三 | 挫败感提醒 | `frustrationTriggers` / `frustrationMessage` | 命中 → 追加一句到下一次注入 |
+| — | 工具失败观测 | `observeToolFailures` | 仅观测，不参与判定 |
+| — | 总开关 | `enabled` | 关闭则引擎不工作 |
+
+> 逐环节的输入、判据与落点见 [loop-mechanisms.md](../architecture/loop-mechanisms.md)。
 
 ## 验证驱动 Loop 与哨兵（v0.4.0 起，v0.5.0 扩展）
 
@@ -59,7 +121,7 @@
 | `verifyTimeoutMs` | `120000` | 单次验证超时；钳制 `1000`..`3600000`（1s..3600s） |
 | `verifyMaxIterations` | `50`（**v0.5.2 默认值变更**，原为 `0`） | 失败轮次上限；`0` = 不限；钳制 `0`..`10000` |
 | `verifyCwd` | 空 | 验证工作目录；空 = 会话/项目目录（`ctx.location.directory`） |
-| `selfEchoWindowMs` | `10000` | 自回声窗口：窗口内与上次注入文本相同的入站「用户」消息视为自身回声，不计入真实用户轮 |
+| `selfEchoWindowMs` | `10000` | 自回声窗口：窗口内与上次注入文本**逐字相同**的入站「用户」消息视为自身回声，不计入真实用户轮；**入站文本提取不到**时也按此窗口兜底判为回声（见下方风险提示）。`0` = 关闭基于时间的判定（此时只有 metadata 溯源能判出回声） |
 | `abortSentinelTag` | `"loop-abort"` | 成对**中止**标签名（`<loop-abort>…</loop-abort>`）；空串禁用。命中 → 会话停止 |
 | `pauseSentinelTag` | `"loop-pause"` | 成对**暂停**标签名；空串禁用。命中 → `paused`，等待用户新消息恢复 |
 | `escalationReassessMessage` | REASSESS 文案 | 验证被拒 `≥3` 次时追加到续跑提示 |
@@ -81,13 +143,36 @@
 - 合并语义：数组**替换**（同 `escalationPressureLadder`），字符串**覆盖**。
 - 匹配只看**真实用户**消息，插件自身注入的回声不触发。
 
+> **自回声时间窗的风险提示（v0.5.5）**：`selfEchoWindowMs` 窗口内，**入站文本提取不到**的
+> 消息会被判为自身回声。若此时来的是一条**真实用户消息**且宿主不提供可提取文本，
+> 该消息会被**吞掉**（既不 `resume()`，也不进入真实用户路径）。
+> 调小 `selfEchoWindowMs` 可降低触发概率；该残留风险本版不修，
+> 已记入 [known-issues.md](../decisions/known-issues.md)。
+
 ## 版本变更说明
+
+### v0.5.5
+
+- **配置诊断**：配置文件**不存在**仍静默回退默认值；**读取失败**或**解析失败**时输出一条
+  含**绝对路径**的告警，不再「配置写错了却毫无提示」。
+- **配置校验**：新增 `startTime` / `endTime` 的 `HH:MM` 校验、`markerRegex` 的长度上限
+  （1024）/ 嵌套量词（ReDoS）/ 可编译三重检查、6 个数组键的空串剔除、数值键的负值钳 0
+  与超大值钳上限（`2^31-1`）。详见「配置校验与诊断」。
+- **JSONC 尾逗号前瞻跳过注释**：`1, // 说明\n}` 不再被当成语法错误。
+- **`selfEchoWindowMs` 语义补全**：入站文本提取不到时按时间窗兜底判为回声（此前文档已承诺、
+  代码里不存在的行为）。残留风险见上方提示。
+
+### v0.5.4
+
+- `loadConfig` 新增可选的全局配置路径注入（`LoadConfigOptions`），不传时行为与 v0.5.3 完全一致。
+- **改完配置仍需完整重启 TUI**（`/reload` 不重载插件）。
 
 ### v0.5.3
 
 - `maxConsecutive` **负值不再静默取消上限**：负值回退默认 `20`；`0` 仍表示不限。
 - 墙钟预算（`watchTimeoutMs`）**按轮次计量**：真实用户消息开启新一轮时预算重算（此前按首次 `/autocontinue on` 累计）。
 - 新增第 8 个停止原因 `title-excluded`（短语 `title excluded`）：此前标题排除路径无 `stopReason`，footer 只能显示裸 `[AC ⏹ N]`。
+- **改完配置仍需完整重启 TUI**（`/reload` 不重载插件）。
 
 ### v0.5.2
 

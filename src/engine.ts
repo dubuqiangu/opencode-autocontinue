@@ -20,6 +20,7 @@ import { buildCompletionMatcher } from "./config.ts"
 import type { WatchStore, InMemoryState } from "./state.ts"
 import { injectContinuation, isPluginInjection } from "./prompt.ts"
 import {
+  errorToMatchString,
   hasCompletionMarker,
   isRetryableError,
   looksIncomplete,
@@ -59,6 +60,24 @@ export interface EventLike {
   data?: Record<string, unknown>
   info?: Record<string, unknown>
   outcome?: unknown
+  /** Some hosts carry the session status directly on the event object (the
+   *  fallback for properties.status / data.status). */
+  status?: unknown
+  /** Some hosts carry the failure directly on the event object (the fallback
+   *  for properties.error / data.error). */
+  error?: unknown
+}
+
+/** Node clamps a timer delay larger than 2**31-1 ms down to 1ms, which turns
+ *  a long heartbeat into a 1ms hot loop. Every delay the engine schedules is
+ *  therefore capped at the maximum safe value. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/** Clamp a timer delay into the safe range [0, MAX_TIMER_DELAY_MS]. */
+export function clampTimerDelay(delayMs: number): number {
+  if (!Number.isFinite(delayMs)) return MAX_TIMER_DELAY_MS
+  if (delayMs <= 0) return 0
+  return Math.min(delayMs, MAX_TIMER_DELAY_MS)
 }
 
 /** Convert "HH:MM" to today's epoch ms. Empty endTime -> 0 (disabled).
@@ -134,18 +153,16 @@ export function retryHookHandler(
     decision: { retry: boolean; delay?: number }
   },
 ): void {
-  const cfg = config()
-  if (!cfg.enabled) return
+  const pluginConfig = config()
+  if (!pluginConfig.enabled) return
   const error = _event.error
   const attempt = _event.attempt ?? 1
-  const status = error?.status
-  const matchString = `${error?.type ?? ""}: ${error?.message ?? ""}${
-    status !== undefined && status !== null ? ` (status: ${status})` : ""
-  }`.toLowerCase()
-  const excluded = cfg.excludePatterns.some((pattern) => matchString.includes(pattern.toLowerCase()))
-  if (excluded) return
-  const matched = cfg.errorPatterns.some((pattern) => matchString.includes(pattern.toLowerCase()))
-  if (!matched) return
+  // The retry-hook path and the message-event path must judge the SAME failure
+  // with the SAME match string, otherwise one `errorPatterns` entry matches on
+  // one path and misses on the other. isRetryableError() normalizes the error
+  // through errorToMatchString(), which falls back to `type` when `name` is
+  // absent — exactly the shape the retry hook receives.
+  if (!isRetryableError(error, pluginConfig.errorPatterns, pluginConfig.excludePatterns)) return
   // Exponential backoff, capped at 60s. Respect the built-in max attempt count.
   const delay = Math.min(2_000 * 2 ** Math.max(0, attempt - 1), 60_000)
   _event.decision = { retry: true, delay }
@@ -174,12 +191,12 @@ export function selectPressureMessage(ladder: string[], rejections: number): str
 
 /** Compose the verify-failure prompt: base message + failure count, then the
  *  pressure-ladder row, then the reassess (>=3) and root-cause (>=5) additions. */
-export function composeRejectionPrompt(cfg: PluginConfig, rejections: number): string {
-  const lines = [cfg.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
-  const pressure = selectPressureMessage(cfg.escalationPressureLadder, rejections)
+export function composeRejectionPrompt(pluginConfig: PluginConfig, rejections: number): string {
+  const lines = [pluginConfig.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
+  const pressure = selectPressureMessage(pluginConfig.escalationPressureLadder, rejections)
   if (pressure) lines.push(pressure)
-  if (rejections >= 3 && cfg.escalationReassessMessage) lines.push(cfg.escalationReassessMessage)
-  if (rejections >= 5 && cfg.escalationRootCauseMessage) lines.push(cfg.escalationRootCauseMessage)
+  if (rejections >= 3 && pluginConfig.escalationReassessMessage) lines.push(pluginConfig.escalationReassessMessage)
+  if (rejections >= 5 && pluginConfig.escalationRootCauseMessage) lines.push(pluginConfig.escalationRootCauseMessage)
   return lines.join("\n")
 }
 
@@ -248,12 +265,14 @@ export class AutocontinueEngine {
 
   /** Timer-managed injection with throttle and window checks. */
   private scheduleInjection(sessionID: string, delayMs: number): void {
+    // A disposed engine must not create new timers.
+    if (this.disposed) return
     const existing = this.timers.get(sessionID)
     if (existing) clearTimeout(existing)
     const timer = setTimeout(() => {
       this.timers.delete(sessionID)
       void this.maybeInject(sessionID)
-    }, delayMs)
+    }, clampTimerDelay(delayMs))
     this.timers.set(sessionID, timer)
   }
 
@@ -278,12 +297,12 @@ export class AutocontinueEngine {
 
   /** Start the per-session interval timer (periodic re-check). No-op when disabled. */
   scheduleInterval(sessionID: string): void {
-    const cfg = this.config()
-    if (this.disposed || !cfg.enabled || cfg.intervalMs <= 0) return
+    const pluginConfig = this.config()
+    if (this.disposed || !pluginConfig.enabled || pluginConfig.intervalMs <= 0) return
     if (this.intervalTimers.has(sessionID)) return
     const timer = setInterval(() => {
       void this.maybeInject(sessionID)
-    }, cfg.intervalMs)
+    }, clampTimerDelay(pluginConfig.intervalMs))
     this.intervalTimers.set(sessionID, timer)
   }
 
@@ -321,12 +340,12 @@ export class AutocontinueEngine {
     template: string,
     endAt: number,
   ): Promise<string> {
-    const cfg = this.config()
+    const pluginConfig = this.config()
     // P2 (frustration): a frustrated real user turn decorates the NEXT
     // injection with the reminder clause. Compose it into the template BEFORE
     // injecting so the self-echo guard records exactly the text we send.
-    const decorate = memory.frustrationPending && cfg.frustrationMessage !== ""
-    const composed = decorate ? `${template}\n\n${cfg.frustrationMessage}` : template
+    const decorate = memory.frustrationPending && pluginConfig.frustrationMessage !== ""
+    const composed = decorate ? `${template}\n\n${pluginConfig.frustrationMessage}` : template
     if (decorate) memory.frustrationPending = false
     const text = await injectContinuation(this.session, sessionID, composed, endAt)
     memory.lastSelfInjection = { text, at: Date.now() }
@@ -335,19 +354,31 @@ export class AutocontinueEngine {
 
   /** Whether an inbound "user" message is actually our own injection returning.
    *  Metadata provenance is authoritative; the self-echo record is the
-   *  host-agnostic fallback for hosts that do not round-trip metadata. */
+   *  host-agnostic fallback for hosts that do not round-trip metadata.
+   *
+   *  The record stays alive for the WHOLE self-echo window: a host may
+   *  deliver the same injection more than once (e.g. as `message.updated` and
+   *  as `session.inbox.enqueued`), and every one of those deliveries must be
+   *  recognized as an echo. Clearing the record on the first hit made the
+   *  second delivery look like a real user turn, which reset the round. */
   private isSelfEcho(
     memory: InMemoryState,
     metadata: unknown,
     inboundText: string | undefined,
+    selfEchoWindowMs: number,
   ): boolean {
     if (isPluginInjection(metadata)) return true
     const record = memory.lastSelfInjection
     if (!record) return false
-    if (Date.now() - record.at > this.config().selfEchoWindowMs) return false
-    // Require exact text equality: without extractable text we never swallow a
-    // message that might be a real user turn.
-    if (inboundText === undefined || inboundText === "") return false
+    if (Date.now() - record.at > selfEchoWindowMs) return false
+    // No extractable text: fall back to the documented time-window rule —
+    // inside the self-echo window an inbound message without text is our own
+    // echo (the host may deliver one injection in several shapes, only some
+    // of which carry the text). Residual risk: a REAL user turn inside the
+    // window that carries no extractable text is swallowed and not handled.
+    if (inboundText === undefined || inboundText === "") return true
+    // Text present but different from the recorded injection: NEVER an echo —
+    // that is a real user turn.
     return inboundText === record.text
   }
 
@@ -361,7 +392,7 @@ export class AutocontinueEngine {
     hasSignal: boolean,
     memory: InMemoryState,
   ): Promise<void> {
-    const cfg = this.config()
+    const pluginConfig = this.config()
     // B-2 (gating): with no completion signal, verification must NOT run — a
     // clean-tree `npm test` would otherwise judge an idle round as done. Fall
     // back to the ordinary continuation behaviour.
@@ -370,8 +401,8 @@ export class AutocontinueEngine {
       if (this.disposed) return
       const freshEntry = this.store.getState(sessionID)
       if (!freshEntry || (freshEntry.state !== "watching" && freshEntry.state !== "confirming")) return
-      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
-      await this.injectAndRecord(memory, sessionID, cfg.message, freshEntry.endAt ?? 0)
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < pluginConfig.userGraceMs) return
+      await this.injectAndRecord(memory, sessionID, pluginConfig.message, freshEntry.endAt ?? 0)
       await this.store.recordInjection(sessionID)
       void this.emitChangedInternal(sessionID, "watching")
       return
@@ -385,7 +416,7 @@ export class AutocontinueEngine {
     // snapshot and validate BEFORE starting the command.
     const freshGate = this.store.getState(sessionID)
     if (!freshGate || (freshGate.state !== "watching" && freshGate.state !== "confirming")) return
-    if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
+    if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < pluginConfig.userGraceMs) return
     // B-4: capture the round identity BEFORE awaiting the command.
     const roundBefore = freshGate.roundId
     const controller = new AbortController()
@@ -399,9 +430,9 @@ export class AutocontinueEngine {
     let outcome: VerifyResult
     try {
       outcome = await this.verifyRunner({
-        argv: verificationArgv(cfg.verifyCommand, process.platform),
-        cwd: cfg.verifyCwd || this.baseDirectory || process.cwd(),
-        timeoutMs: cfg.verifyTimeoutMs,
+        argv: verificationArgv(pluginConfig.verifyCommand, process.platform),
+        cwd: pluginConfig.verifyCwd || this.baseDirectory || process.cwd(),
+        timeoutMs: pluginConfig.verifyTimeoutMs,
         signal: controller.signal,
       })
     } finally {
@@ -420,7 +451,7 @@ export class AutocontinueEngine {
     if (after.endAt && Date.now() >= after.endAt) return
     // Wall-clock budget is measured per round (roundSince), not since the
     // watch started (since) — see WatchState.roundSince.
-    if (cfg.watchTimeoutMs > 0 && Date.now() - after.roundSince >= cfg.watchTimeoutMs) return
+    if (pluginConfig.watchTimeoutMs > 0 && Date.now() - after.roundSince >= pluginConfig.watchTimeoutMs) return
 
     if (outcome.pass) {
       await this.store.markDone(sessionID)
@@ -434,7 +465,7 @@ export class AutocontinueEngine {
     // final failing round is judged stopped instead of silently continuing.
     await this.store.recordRejection(sessionID)
     const rejections = this.store.getState(sessionID)?.rejections ?? 0
-    if (cfg.verifyMaxIterations > 0 && rejections >= cfg.verifyMaxIterations) {
+    if (pluginConfig.verifyMaxIterations > 0 && rejections >= pluginConfig.verifyMaxIterations) {
       await this.store.markStopped(sessionID, "verify-limit")
       this.clearTimer(sessionID)
       this.stopInterval(sessionID)
@@ -442,8 +473,8 @@ export class AutocontinueEngine {
       return
     }
 
-    const prompt = composeRejectionPrompt(cfg, rejections)
-    const detail = buildVerifyDetail(cfg.verifyCommand, outcome)
+    const prompt = composeRejectionPrompt(pluginConfig, rejections)
+    const detail = buildVerifyDetail(pluginConfig.verifyCommand, outcome)
     await this.injectAndRecord(memory, sessionID, `${prompt}\n\n${detail}`, after.endAt ?? 0)
     await this.store.recordInjection(sessionID)
     void this.emitChangedInternal(sessionID, "watching")
@@ -454,9 +485,9 @@ export class AutocontinueEngine {
    *  confirming -> done) with an optional whole-project review + doc sync in
    *  between. `injections` counts every injection and drives maxConsecutive. */
   private async maybeInject(sessionID: string): Promise<void> {
-    const cfg = this.config()
+    const pluginConfig = this.config()
     const memory = this.store.getMemory(sessionID)
-    if (this.disposed || !cfg.enabled) return
+    if (this.disposed || !pluginConfig.enabled) return
     if (memory.inFlight) return
     // Set the lock at entry: later awaits (title, latest message) must not let
     // concurrent triggers double-inject (TOCTOU window).
@@ -469,7 +500,7 @@ export class AutocontinueEngine {
       }
 
       // Time window (endAt frozen at watch time).
-      if (startGateClosed(cfg.startTime, cfg.endTime)) return
+      if (startGateClosed(pluginConfig.startTime, pluginConfig.endTime)) return
       if (entry.endAt && Date.now() >= entry.endAt) {
         await this.store.markStopped(sessionID, "window-closed")
         this.clearTimer(sessionID)
@@ -480,7 +511,7 @@ export class AutocontinueEngine {
 
       // Wall-clock watch budget (watchTimeoutMs = 0 means no limit). Measured
       // per round (roundSince), so a new user turn starts a fresh budget.
-      if (cfg.watchTimeoutMs > 0 && Date.now() - entry.roundSince >= cfg.watchTimeoutMs) {
+      if (pluginConfig.watchTimeoutMs > 0 && Date.now() - entry.roundSince >= pluginConfig.watchTimeoutMs) {
         await this.store.markStopped(sessionID, "watch-timeout")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -489,7 +520,7 @@ export class AutocontinueEngine {
       }
 
       // Injection cap.
-      if (cfg.maxConsecutive > 0 && entry.injections >= cfg.maxConsecutive) {
+      if (pluginConfig.maxConsecutive > 0 && entry.injections >= pluginConfig.maxConsecutive) {
         await this.store.markStopped(sessionID, "injection-cap")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -498,14 +529,14 @@ export class AutocontinueEngine {
       }
 
       // User grace: if the user just sent a real message, wait.
-      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) {
-        this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 10_000))
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < pluginConfig.userGraceMs) {
+        this.scheduleInjection(sessionID, Math.max(pluginConfig.idleDelayMs, 10_000))
         return
       }
 
       // Session title exclusion.
       const title = await this.resolveTitle(sessionID)
-      if (titleExcluded(title, cfg.excludeTitleKeywords)) {
+      if (titleExcluded(title, pluginConfig.excludeTitleKeywords)) {
         await this.store.markStopped(sessionID, "title-excluded")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -519,23 +550,23 @@ export class AutocontinueEngine {
       // Session actively running/streaming (execution started, step started/
       // streamed, or busy status) — don't poke a live run. idleDelayMs grace so
       // a just-settled session can be resumed promptly.
-      if (memory.lastActiveAt && Date.now() - memory.lastActiveAt < cfg.idleDelayMs) return
+      if (memory.lastActiveAt && Date.now() - memory.lastActiveAt < pluginConfig.idleDelayMs) return
 
       // Min interval between injections.
-      if (entry.lastInjectedAt && Date.now() - entry.lastInjectedAt < cfg.minIntervalMs) {
-        const remaining = cfg.minIntervalMs - (Date.now() - entry.lastInjectedAt)
-        this.scheduleInjection(sessionID, remaining + 100)
+      if (entry.lastInjectedAt && Date.now() - entry.lastInjectedAt < pluginConfig.minIntervalMs) {
+        const remaining = pluginConfig.minIntervalMs - (Date.now() - entry.lastInjectedAt)
+        this.scheduleInjection(sessionID, clampTimerDelay(remaining + 100))
         return
       }
 
       // Inspect the latest assistant message to decide what to do.
-      const matcher = buildCompletionMatcher(cfg)
+      const matcher = buildCompletionMatcher(pluginConfig)
       const latest = await this.latestAssistantText(sessionID)
       const hasMarker = hasCompletionMarker(latest.text, matcher)
 
       // Opt-in tool-failure observation (observation only; never affects the
       // completion/stop decision) — recorded before any branch.
-      if (cfg.observeToolFailures) {
+      if (pluginConfig.observeToolFailures) {
         this.store.observeToolOutcome(sessionID, latest.lastToolId, latest.lastToolErrored)
       }
 
@@ -546,7 +577,7 @@ export class AutocontinueEngine {
       // F8: an explicit abort must beat the background-work guard below — a
       // running (or orphaned non-terminal) subagent must never make the model's
       // explicit abort be ignored.
-      if (matchSentinel(latest.text, cfg.abortSentinelTag)) {
+      if (matchSentinel(latest.text, pluginConfig.abortSentinelTag)) {
         await this.store.markStopped(sessionID, "abort-sentinel")
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -562,7 +593,7 @@ export class AutocontinueEngine {
 
       // Pause sentinel stays AFTER the background-work guard: pausing is not a
       // hard override of in-flight work, unlike abort.
-      if (matchSentinel(latest.text, cfg.pauseSentinelTag)) {
+      if (matchSentinel(latest.text, pluginConfig.pauseSentinelTag)) {
         await this.store.markPaused(sessionID)
         this.clearTimer(sessionID)
         this.stopInterval(sessionID)
@@ -572,7 +603,7 @@ export class AutocontinueEngine {
 
       // Verify mode replaces the marker / final-check flow entirely: the
       // outcome is judged only by the configured command (see runVerifyGate).
-      if (cfg.verifyCommand) {
+      if (pluginConfig.verifyCommand) {
         await this.runVerifyGate(sessionID, entry, latest, hasMarker, memory)
         return
       }
@@ -606,13 +637,29 @@ export class AutocontinueEngine {
         void this.emitChangedInternal(sessionID, "watching")
         return
       }
-      if (hasMarker && cfg.finalCheckEnabled) {
+      if (hasMarker && pluginConfig.finalCheckEnabled) {
         // First marker while watching: run the whole-project review round.
         this.confirmingAtAssistantCount.set(sessionID, latest.assistantCount)
         await this.store.beginConfirming(sessionID)
+        // Re-check the watch: the entry may have been removed while
+        // beginConfirming awaited (the user ran /autocontinue off) — never
+        // inject into a session that is no longer watched.
+        if (this.disposed) return
+        const confirmingEntry = this.store.getState(sessionID)
+        if (
+          !confirmingEntry ||
+          (confirmingEntry.state !== "watching" && confirmingEntry.state !== "confirming")
+        ) {
+          return
+        }
         this.clearTimer(sessionID)
         void this.emitChangedInternal(sessionID, "confirming")
-        await this.injectAndRecord(memory, sessionID, cfg.finalCheckMessage, entry.endAt ?? 0)
+        await this.injectAndRecord(
+          memory,
+          sessionID,
+          pluginConfig.finalCheckMessage,
+          confirmingEntry.endAt ?? 0,
+        )
         await this.store.recordInjection(sessionID)
         void this.emitChangedInternal(sessionID, "confirming")
         return
@@ -634,9 +681,9 @@ export class AutocontinueEngine {
       if (this.disposed) return
       const freshEntry = this.store.getState(sessionID)
       if (!freshEntry || (freshEntry.state !== "watching" && freshEntry.state !== "confirming")) return
-      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < cfg.userGraceMs) return
+      if (memory.lastUserMessageAt && Date.now() - memory.lastUserMessageAt < pluginConfig.userGraceMs) return
 
-      await this.injectAndRecord(memory, sessionID, cfg.message, freshEntry.endAt ?? 0)
+      await this.injectAndRecord(memory, sessionID, pluginConfig.message, freshEntry.endAt ?? 0)
       await this.store.recordInjection(sessionID)
       void this.emitChangedInternal(sessionID, "watching")
     } catch (error) {
@@ -791,14 +838,19 @@ export class AutocontinueEngine {
 
   /** Handle a single server event. */
   async handleEvent(event: EventLike): Promise<void> {
+    // A disposed engine must not touch the store, the timers or the config.
+    if (this.disposed) return
     if (!event) return
     const type = event.type
     const sessionID = sessionIDFromEvent(event)
     if (!sessionID) return
 
-    const cfg = this.config()
-    if (!cfg.enabled) return
+    // The watch check comes FIRST: an event of a session that is not watched
+    // costs no config read at all.
     if (!this.store.isWatching(sessionID)) return
+
+    const pluginConfig = this.config()
+    if (!pluginConfig.enabled) return
 
     const memory = this.store.getMemory(sessionID)
 
@@ -831,7 +883,7 @@ export class AutocontinueEngine {
       case "session.execution.failed":
       case "session.retry.scheduled": {
         const error = event.properties?.error ?? event.data?.error ?? event.error
-        if (isRetryableError(error, cfg.errorPatterns, cfg.excludePatterns)) {
+        if (isRetryableError(error, pluginConfig.errorPatterns, pluginConfig.excludePatterns)) {
           memory.pendingContinue = true
           memory.pendingContinueAt = Date.now()
         }
@@ -853,11 +905,11 @@ export class AutocontinueEngine {
         }
         if (memory.pendingContinue) {
           memory.pendingContinue = false
-          this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 1_000))
+          this.scheduleInjection(sessionID, Math.max(pluginConfig.idleDelayMs, 1_000))
         } else {
           // Stage-complete idle without a recent error: also resume, so overall
           // unfinished work keeps going. Completion marker is checked inside.
-          this.scheduleInjection(sessionID, cfg.idleDelayMs)
+          this.scheduleInjection(sessionID, pluginConfig.idleDelayMs)
         }
         break
       }
@@ -900,15 +952,18 @@ export class AutocontinueEngine {
         // continuation ("继续执行") also lands as type "user" on hosts without
         // the synthetic channel, so it must never zero the injection counter.
         if (inboxItem?.type === "user") {
-          if (this.isSelfEcho(memory, itemMetadata, itemText)) {
-            memory.lastSelfInjection = undefined
+          // The self-echo record is NOT consumed here: it stays usable for the
+          // whole self-echo window, so a second delivery of the SAME
+          // injection (message.updated + session.inbox.enqueued) is recognized
+          // as an echo too.
+          if (this.isSelfEcho(memory, itemMetadata, itemText, pluginConfig.selfEchoWindowMs)) {
             break
           }
           // P2: a complaint about the delivered quality decorates the next
           // injection and keeps the rejection counter (the last delivery was
           // rejected). Matching happens AFTER the self-echo guard so our own
           // injected text can never trigger it.
-          const frustrated = matchesFrustration(itemText, cfg.frustrationTriggers)
+          const frustrated = matchesFrustration(itemText, pluginConfig.frustrationTriggers)
           if (frustrated) memory.frustrationPending = true
           memory.lastUserMessageAt = Date.now()
           // A real user turn supersedes any in-flight verification round.
@@ -932,14 +987,13 @@ export class AutocontinueEngine {
             messageText((info as { parts?: unknown }).parts) ||
             messageText((info as { content?: unknown }).content) ||
             undefined
-          if (this.isSelfEcho(memory, infoMetadata, infoText)) {
-            memory.lastSelfInjection = undefined
+          if (this.isSelfEcho(memory, infoMetadata, infoText, pluginConfig.selfEchoWindowMs)) {
             break
           }
           // P2: same frustration handling as the V2 inbox branch — matched
           // AFTER the self-echo guard, and a complaint keeps the rejection
           // counter because the previous delivery was rejected.
-          const frustrated = matchesFrustration(infoText, cfg.frustrationTriggers)
+          const frustrated = matchesFrustration(infoText, pluginConfig.frustrationTriggers)
           if (frustrated) memory.frustrationPending = true
           memory.lastUserMessageAt = Date.now()
           this.abortVerify(sessionID)
@@ -951,13 +1005,13 @@ export class AutocontinueEngine {
         }
         if (role === "assistant") {
           const error = (info as { error?: unknown }).error
-          if (error && isRetryableError(error, cfg.errorPatterns, cfg.excludePatterns)) {
+          if (error && isRetryableError(error, pluginConfig.errorPatterns, pluginConfig.excludePatterns)) {
             memory.pendingContinue = true
             break
           }
           const messageID = sessionIDFromMessageInfo(info as Record<string, unknown>)
           if (!messageID) break
-          const matcher = buildCompletionMatcher(cfg)
+          const matcher = buildCompletionMatcher(pluginConfig)
           if (!matcher) break
           // P2-6: throttle the full-context completion check — streaming hosts
           // emit many message.updated events per message; pulling session
@@ -982,8 +1036,8 @@ export class AutocontinueEngine {
             // (markDone / beginConfirming / finalCheck injection). A detected
             // signal only schedules a maybeInject; the verify gate there owns
             // the decision.
-            if (cfg.verifyCommand) {
-              if (hasMarker) this.scheduleInjection(sessionID, Math.max(cfg.idleDelayMs, 1_000))
+            if (pluginConfig.verifyCommand) {
+              if (hasMarker) this.scheduleInjection(sessionID, Math.max(pluginConfig.idleDelayMs, 1_000))
               break
             }
             if (current?.state === "confirming") {
@@ -1003,12 +1057,27 @@ export class AutocontinueEngine {
                 this.confirmingAtAssistantCount.delete(sessionID)
                 void this.emitChangedInternal(sessionID, "watching")
               }
-            } else if (hasMarker && cfg.finalCheckEnabled) {
+            } else if (hasMarker && pluginConfig.finalCheckEnabled) {
               this.confirmingAtAssistantCount.set(sessionID, latest.assistantCount)
               await this.store.beginConfirming(sessionID)
+              // Same re-check as the maybeInject path: the session may have
+              // been unwatched while beginConfirming awaited — never inject.
+              if (this.disposed) return
+              const confirmingEntry = this.store.getState(sessionID)
+              if (
+                !confirmingEntry ||
+                (confirmingEntry.state !== "watching" && confirmingEntry.state !== "confirming")
+              ) {
+                return
+              }
               this.clearTimer(sessionID)
               void this.emitChangedInternal(sessionID, "confirming")
-              await this.injectAndRecord(memory, sessionID, cfg.finalCheckMessage, current?.endAt ?? 0)
+              await this.injectAndRecord(
+                memory,
+                sessionID,
+                pluginConfig.finalCheckMessage,
+                confirmingEntry.endAt ?? 0,
+              )
               await this.store.recordInjection(sessionID)
               void this.emitChangedInternal(sessionID, "confirming")
             } else if (hasMarker) {

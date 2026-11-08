@@ -10,6 +10,18 @@ export interface StorageLike {
 
 const STORAGE_KEY = "opencode-autocontinue.watched"
 
+/** Process-wide monotonic round counter. Every watch()/resume() takes a fresh
+ *  number from here, so round ids are globally unique and strictly increasing
+ *  — a stale verification result can never be mistaken for the current round
+ *  (an "off -> on" switch used to reset the id to 0).
+ *
+ *  The counter is a static class member rather than an instance field: two
+ *  WatchStore instances in the same process (a restart inside one host, or a
+ *  test creating a second store) must never hand out the same id, otherwise a
+ *  verification result captured under one store could be accepted by the
+ *  other. */
+let processRoundIdCounter = 0
+
 /** Why a watch round stopped. Persisted with the watch state so the UI can
  *  tell a guardrail stop apart from a window close or a user abort.
  *  The canonical list lives in `src/rpc.ts` (shared with the TUI); it is
@@ -22,8 +34,23 @@ export function isStopReason(value: unknown): value is StopReason {
   return typeof value === "string" && STOP_REASONS.includes(value as StopReason)
 }
 
-export interface InMemoryState {
+/** Cross-round operation state of a watched session. It is deliberately NOT
+ *  reset when a new watch round starts: the in-flight injection lock belongs
+ *  to the injection lifecycle, not to the round. Dropping it would let a
+ *  second trigger inject a second time while the first injection is still
+ *  running. */
+export interface SessionLock {
+  /** True while an injection is in flight for this session. */
   inFlight: boolean
+  /** Aborts a still-running verification command (off / dispose / new round). */
+  activeVerifyAbort?: AbortController
+  /** True while this session's verification command is in flight (drives the
+   *  "verifying" indicator in the TUI). */
+  verifying: boolean
+}
+
+/** Per-round cache of a watched session. A new watch round resets it. */
+export interface RoundCache {
   /** True when a real user message expressed dissatisfaction with the quality;
    *  the frustration clause is then appended to the next injection. */
   frustrationPending: boolean
@@ -40,11 +67,6 @@ export interface InMemoryState {
    *  guard: a matching inbound "user" message is our own injection returning,
    *  not a real user turn. */
   lastSelfInjection?: { text: string; at: number }
-  /** Aborts a still-running verification command (off / dispose / new round). */
-  activeVerifyAbort?: AbortController
-  /** True while this session's verification command is in flight (drives the
-   *  "verifying" indicator in the TUI). */
-  verifying: boolean
   /** Opt-in tool-failure observation counter (does NOT affect completion). */
   toolFailureCount: number
   /** Rolling window of distinct failed tool ids, so a retried failure is not
@@ -52,9 +74,114 @@ export interface InMemoryState {
   toolFailureIds: string[]
 }
 
+/** Merged view over a session's lock and round cache. */
+export interface InMemoryState extends SessionLock, RoundCache {}
+
+/** Live view over one session's lock and round cache. Every field write goes
+ *  straight to the underlying record, so `getMemory()` stays a drop-in
+ *  replacement for the previous single-object API. */
+class SessionMemoryView implements InMemoryState {
+  readonly lock: SessionLock
+  readonly round: RoundCache
+
+  constructor(lock: SessionLock, round: RoundCache) {
+    this.lock = lock
+    this.round = round
+  }
+
+  get inFlight(): boolean {
+    return this.lock.inFlight
+  }
+  set inFlight(value: boolean) {
+    this.lock.inFlight = value
+  }
+
+  get activeVerifyAbort(): AbortController | undefined {
+    return this.lock.activeVerifyAbort
+  }
+  set activeVerifyAbort(value: AbortController | undefined) {
+    this.lock.activeVerifyAbort = value
+  }
+
+  get verifying(): boolean {
+    return this.lock.verifying
+  }
+  set verifying(value: boolean) {
+    this.lock.verifying = value
+  }
+
+  get frustrationPending(): boolean {
+    return this.round.frustrationPending
+  }
+  set frustrationPending(value: boolean) {
+    this.round.frustrationPending = value
+  }
+
+  get pendingContinue(): boolean {
+    return this.round.pendingContinue
+  }
+  set pendingContinue(value: boolean) {
+    this.round.pendingContinue = value
+  }
+
+  get pendingContinueAt(): number {
+    return this.round.pendingContinueAt
+  }
+  set pendingContinueAt(value: number) {
+    this.round.pendingContinueAt = value
+  }
+
+  get lastUserMessageAt(): number {
+    return this.round.lastUserMessageAt
+  }
+  set lastUserMessageAt(value: number) {
+    this.round.lastUserMessageAt = value
+  }
+
+  get lastBusyAt(): number {
+    return this.round.lastBusyAt
+  }
+  set lastBusyAt(value: number) {
+    this.round.lastBusyAt = value
+  }
+
+  get lastActiveAt(): number {
+    return this.round.lastActiveAt
+  }
+  set lastActiveAt(value: number) {
+    this.round.lastActiveAt = value
+  }
+
+  get lastSelfInjection(): { text: string; at: number } | undefined {
+    return this.round.lastSelfInjection
+  }
+  set lastSelfInjection(value: { text: string; at: number } | undefined) {
+    this.round.lastSelfInjection = value
+  }
+
+  get toolFailureCount(): number {
+    return this.round.toolFailureCount
+  }
+  set toolFailureCount(value: number) {
+    this.round.toolFailureCount = value
+  }
+
+  get toolFailureIds(): string[] {
+    return this.round.toolFailureIds
+  }
+  set toolFailureIds(value: string[]) {
+    this.round.toolFailureIds = value
+  }
+}
+
 export class WatchStore {
   private readonly watched = new Map<string, WatchState>()
-  private readonly inMemory = new Map<string, InMemoryState>()
+  /** Cross-round operation state (in-flight injection lock, running verify). */
+  private readonly locks = new Map<string, SessionLock>()
+  /** Per-round cache; reset when a new watch round starts. */
+  private readonly rounds = new Map<string, RoundCache>()
+  /** Live merged views handed out by getMemory(). */
+  private readonly views = new Map<string, SessionMemoryView>()
   private readonly storage: StorageLike
 
   constructor(storage: StorageLike) {
@@ -67,6 +194,26 @@ export class WatchStore {
       const saved = (await this.storage.get(STORAGE_KEY)) as Record<string, WatchState> | undefined
       if (saved && typeof saved === "object") {
         const now = Date.now()
+        // The round counter must stay ahead of EVERY persisted round id, so a
+        // fresh watch()/resume() never hands out an id that a stale
+        // verification result could still carry.
+        let highestPersistedRoundId = 0
+        for (const persisted of Object.values(saved) as unknown[]) {
+          const persistedRoundId =
+            persisted && typeof persisted === "object"
+              ? (persisted as { roundId?: unknown }).roundId
+              : undefined
+          if (
+            typeof persistedRoundId === "number" &&
+            Number.isFinite(persistedRoundId) &&
+            persistedRoundId > highestPersistedRoundId
+          ) {
+            highestPersistedRoundId = persistedRoundId
+          }
+        }
+        if (highestPersistedRoundId > processRoundIdCounter) {
+          processRoundIdCounter = highestPersistedRoundId
+        }
         for (const [sessionID, entry] of Object.entries(saved)) {
           if (!entry || typeof entry.sessionID !== "string") continue
           // Terminal rows (done/stopped) are round-end feedback for the
@@ -138,24 +285,66 @@ export class WatchStore {
     return this.watched.get(sessionID)
   }
 
+  /** Live view of a session's lock and round cache. The returned object stays
+   *  valid across a new watch round (the round cache is reset in place) and
+   *  every field write goes through to the underlying records. */
   getMemory(sessionID: string): InMemoryState {
-    let memory = this.inMemory.get(sessionID)
-    if (!memory) {
-      memory = {
-        inFlight: false,
+    let view = this.views.get(sessionID)
+    if (!view) {
+      view = new SessionMemoryView(this.getLock(sessionID), this.getRoundCache(sessionID))
+      this.views.set(sessionID, view)
+    }
+    return view
+  }
+
+  /** The in-flight lock of a session. It survives a new watch round. */
+  getLock(sessionID: string): SessionLock {
+    let lock = this.locks.get(sessionID)
+    if (!lock) {
+      lock = { inFlight: false, verifying: false }
+      this.locks.set(sessionID, lock)
+    }
+    return lock
+  }
+
+  /** The per-round cache of a session. */
+  getRoundCache(sessionID: string): RoundCache {
+    let round = this.rounds.get(sessionID)
+    if (!round) {
+      round = {
         frustrationPending: false,
         pendingContinue: false,
         pendingContinueAt: 0,
         lastUserMessageAt: 0,
         lastBusyAt: 0,
         lastActiveAt: 0,
-        verifying: false,
         toolFailureCount: 0,
         toolFailureIds: [],
       }
-      this.inMemory.set(sessionID, memory)
+      this.rounds.set(sessionID, round)
     }
-    return memory
+    return round
+  }
+
+  /** Take the next round id from the process-wide monotonic counter. */
+  private allocateRoundId(): number {
+    processRoundIdCounter += 1
+    return processRoundIdCounter
+  }
+
+  /** Reset the per-round cache of a session. The in-flight lock is NOT
+   *  touched: it belongs to the injection lifecycle, not to the round. */
+  private resetRoundCache(sessionID: string): void {
+    const round = this.getRoundCache(sessionID)
+    round.frustrationPending = false
+    round.pendingContinue = false
+    round.pendingContinueAt = 0
+    round.lastUserMessageAt = 0
+    round.lastBusyAt = 0
+    round.lastActiveAt = 0
+    round.lastSelfInjection = undefined
+    round.toolFailureCount = 0
+    round.toolFailureIds = []
   }
 
   /** Enable watching for a session. Resets counters. */
@@ -169,13 +358,17 @@ export class WatchStore {
       injections: 0,
       totalInjections: 0,
       rejections: 0,
-      // A fresh watch initializes the round id; resume() bumps it (see below).
-      roundId: 0,
+      // A fresh watch starts a new round: take a fresh id from the global
+      // counter (never 0) so a verification result from an earlier round is
+      // recognized as stale. resume() takes the next id from the same counter.
+      roundId: this.allocateRoundId(),
       state: "watching",
       endAt,
     }
     this.watched.set(sessionID, entry)
-    this.inMemory.delete(sessionID)
+    // The per-round cache is reset, but the in-flight lock survives: an
+    // injection that is still running must not be duplicated by the new round.
+    this.resetRoundCache(sessionID)
     await this.persist()
     return entry
   }
@@ -183,7 +376,10 @@ export class WatchStore {
   /** Disable watching for a session. */
   async unwatch(sessionID: string): Promise<void> {
     this.watched.delete(sessionID)
-    this.inMemory.delete(sessionID)
+    // Both concerns are dropped: the lock AND the round cache.
+    this.locks.delete(sessionID)
+    this.rounds.delete(sessionID)
+    this.views.delete(sessionID)
     await this.persist()
   }
 
@@ -277,7 +473,12 @@ export class WatchStore {
     // A complaint about the delivered quality is itself evidence that the last
     // round was rejected, so that counter is preserved.
     if (!preserveRejections) entry.rejections = 0
-    entry.roundId += 1
+    // The round id advances to a FRESH id from the global counter (not a
+    // per-session +1): ids are globally unique and strictly increasing, so a
+    // verification result from a superseded round is always recognized as
+    // stale — even after an "off -> on" switch, which used to reset the id
+    // to 0 and could let a stale PASS mark the new round done.
+    entry.roundId = this.allocateRoundId()
     // The wall-clock watch budget is measured per round: a new round starts a
     // fresh budget instead of inheriting the previous round's remainder.
     // `since` is deliberately NOT touched — it marks the start of the whole
@@ -285,10 +486,10 @@ export class WatchStore {
     entry.roundSince = Date.now()
     // 用户新消息代表新一轮对话：清掉 pendingContinue 闩锁（错误已解决）。
     // 但保留 lastUserMessageAt——宽限期判定仍依赖它，整删内存会破坏 userGraceMs。
-    const memory = this.inMemory.get(sessionID)
-    if (memory) {
-      memory.pendingContinue = false
-      memory.pendingContinueAt = 0
+    const round = this.rounds.get(sessionID)
+    if (round) {
+      round.pendingContinue = false
+      round.pendingContinueAt = 0
     }
     // P2-10: 若值守窗口已过（endAt 过去），resume 不应把它翻回 watching 后又被
     // 下一次 idle 打回 stopped（反复翻转）。调用方传 recomputeEndAt=true 时，仅
@@ -302,7 +503,7 @@ export class WatchStore {
 
   /** True while this session's verification command is in flight. */
   isVerifying(sessionID: string): boolean {
-    return this.inMemory.get(sessionID)?.verifying ?? false
+    return this.locks.get(sessionID)?.verifying ?? false
   }
 
   /** Observe one tool outcome for the opt-in failure counter (observation only,
@@ -328,7 +529,8 @@ export class WatchStore {
   status(sessionID: string): { watched: boolean; state?: WatchStatus } {
     const entry = this.watched.get(sessionID)
     if (!entry) return { watched: false }
-    const memory = this.inMemory.get(sessionID)
+    const lock = this.locks.get(sessionID)
+    const round = this.rounds.get(sessionID)
     return {
       watched: true,
       state: {
@@ -341,8 +543,8 @@ export class WatchStore {
         ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
         since: entry.since,
         rejections: entry.rejections,
-        verifying: memory?.verifying ?? false,
-        toolFailureCount: memory?.toolFailureCount ?? 0,
+        verifying: lock?.verifying ?? false,
+        toolFailureCount: round?.toolFailureCount ?? 0,
         // Only present while the round carries a stop reason.
         ...(entry.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
       },
@@ -358,8 +560,8 @@ export class WatchStore {
       ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
       since: entry.since,
       rejections: entry.rejections,
-      verifying: this.inMemory.get(entry.sessionID)?.verifying ?? false,
-      toolFailureCount: this.inMemory.get(entry.sessionID)?.toolFailureCount ?? 0,
+      verifying: this.locks.get(entry.sessionID)?.verifying ?? false,
+      toolFailureCount: this.rounds.get(entry.sessionID)?.toolFailureCount ?? 0,
       // Only present while the round carries a stop reason.
       ...(entry.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
     }))
