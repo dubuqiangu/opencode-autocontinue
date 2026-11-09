@@ -347,21 +347,49 @@ export default Plugin.define({
     }
 
     // Right-sidebar status block (mirrors opencode-usage-meter's
-    // sidebar-metrics slot). The container box stays mounted while idle —
-    // its tracked function-child gate renders an empty (zero-height) box so
-    // the block occupies no visible space until watching starts. The sidebar
-    // render is wrapped in a reactive mount (verticalLayout=true:
-    // width="100%" column box) so the block updates live without a host
-    // re-mount (pitfall #13, OMO-Slim pattern since v0.3.9).
+    // sidebar-metrics slot). Unlike the footer, this contribution MUST be able
+    // to resolve to NO node while idle: the host lays out every
+    // sidebar.content contribution as a flex child of a `gap={1}` box, and a
+    // zero-height container still counts as a child — so the old always-present
+    // box ate a gap on BOTH sides (the OMO-Slim→Stats doubled-gap bug).
+    //
+    // The render therefore returns a THUNK. The host resolves it through Solid's
+    // children()/resolveChildren inside its own createMemo, so a signal read in
+    // the thunk is a dependency of exactly this contribution and the block
+    // re-resolves live on a visibility flip — no host re-mount (pitfall #13,
+    // OMO-Slim reactiveElement pattern since v0.3.9).
+    //
+    // The gate is a once-created boolean memo: Solid compares memo output with
+    // ===, so a status tick that only changes the store object's identity
+    // recomputes the memo but does NOT propagate — the host resolver never
+    // re-runs on it, so the box is not remounted per tick. The box itself is
+    // built inside the thunk, i.e. owned by that resolver memo, so it is
+    // created once per visible episode and disposed on the flip. It is NOT
+    // cached across idle: detaching a node destroys it on the next tick
+    // (@opentui/solid _removeNode), so a cached box could never be reattached.
+    //
+    // `true` is a Solid "render nothing": opentui's insertExpression emits no
+    // node for a boolean (no flex child, no gap) while the host's
+    // hasInitialOutput check still counts the contribution as live. Returning
+    // null here would fail that check at the idle first paint and leave the
+    // block permanently unsubscribed.
     const sidebarMount = createReactiveSlotMount(true)
     let stopSidebarSlot: (() => void) | undefined
     try {
       const sidebarResult = context.ui.slot({
         append: "sidebar.content",
-        render: (sidebarProps: any) =>
-          sidebarProps?.sessionID
-            ? sidebarMount.swap(() => <SidebarStatus sessionID={sidebarProps.sessionID} />)
-            : null,
+        render: (sidebarProps: any) => {
+          const sessionID = sidebarProps?.sessionID
+          if (!sessionID) return null
+          const sidebarBlockVisible = createMemo(() => {
+            const status = statusOf(sessionID)
+            return status?.state === "watching" || status?.state === "confirming"
+          })
+          return () => {
+            if (!sidebarBlockVisible()) return true
+            return sidebarMount.swap(() => <SidebarStatus sessionID={sessionID} />)
+          }
+        },
       })
       if (typeof sidebarResult?.dispose === "function") stopSidebarSlot = sidebarResult.dispose
       else if (typeof sidebarResult === "function") stopSidebarSlot = sidebarResult as () => void

@@ -388,7 +388,18 @@ var tui_default = Plugin.define({
     try {
       const sidebarResult = context.ui.slot({
         append: "sidebar.content",
-        render: (sidebarProps) => sidebarProps?.sessionID ? sidebarMount.swap(() => /* @__PURE__ */ jsx(SidebarStatus, { sessionID: sidebarProps.sessionID })) : null
+        render: (sidebarProps) => {
+          const sessionID = sidebarProps?.sessionID;
+          if (!sessionID) return null;
+          const sidebarBlockVisible = createMemo(() => {
+            const status = statusOf(sessionID);
+            return status?.state === "watching" || status?.state === "confirming";
+          });
+          return () => {
+            if (!sidebarBlockVisible()) return true;
+            return sidebarMount.swap(() => /* @__PURE__ */ jsx(SidebarStatus, { sessionID }));
+          };
+        }
       });
       if (typeof sidebarResult?.dispose === "function") stopSidebarSlot = sidebarResult.dispose;
       else if (typeof sidebarResult === "function") stopSidebarSlot = sidebarResult;
