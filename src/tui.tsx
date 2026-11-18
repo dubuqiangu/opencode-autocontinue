@@ -31,7 +31,7 @@ import { resolveSessionID } from "./session-resolution.ts"
 // Pure TUI helpers (stop-reason labels, duration formatting, the
 // `state.changed` merge rule) live in a JSX-free, solid-free module so the
 // test suite can import them directly instead of scraping this file's text.
-import { STOP_REASON_LABELS, formatDuration, mergeWatchState, stopReasonLabel, watchStateLabel } from "./tui-logic.ts"
+import { STOP_REASON_LABELS, footerIndicatorLabel, formatDuration, mergeWatchState, statusToastMessage, stopReasonLabel, watchStateLabel } from "./tui-logic.ts"
 import type { WatchStatusView } from "./tui-logic.ts"
 // 0.3.5: slot mounts that create their render effects inside the plugin's own
 // module graph (see reactive-mount.ts — pitfall #13 verdict, mirrors
@@ -174,18 +174,7 @@ export default Plugin.define({
       if (!sessionID) return null
       const label = createMemo(() => {
         const status = statusOf(sessionID)
-        if (status === undefined) return null
-        if (status.state === "done") return "[AC ✓]"
-        if (status.state === "paused") return "[AC ⏸]"
-        if (status.state === "stopped") {
-          // The stop reason is shown here and in the /autocontinue status
-          // toast only — the sidebar block never renders terminal states.
-          const phrase = stopReasonLabel(status.stopReason)
-          return phrase === undefined
-            ? `[AC ⏹ ${status.injections}]`
-            : `[AC ⏹ ${status.injections} · ${phrase}]`
-        }
-        return "[AC ●]"
+        return footerIndicatorLabel(status)
       })
       return <text>{() => label()}</text>
     }
@@ -440,22 +429,17 @@ export default Plugin.define({
                           const result = await rpc.status({ sessionID })
                           if (result.watched && result.state) {
                             updateStatus(sessionID, result.state)
-                            // A stopped round carries a short human-readable
-                            // reason phrase (footer + toast are the only two
-                            // surfaces that show it).
-                            const stopPhrase =
-                              result.state.state === "stopped"
-                                ? stopReasonLabel(result.state.stopReason)
-                                : undefined
-                            const stopSuffix = stopPhrase === undefined ? "" : ` · ${stopPhrase}`
                             // The leading "Watching" segment is gone: it only
                             // repeated the state word. The state label itself
                             // now leads the line, so the toast and the sidebar
                             // 🎯 row name the same state the same way (same
-                            // map, ./tui-logic.ts).
+                            // map, ./tui-logic.ts). The toast body is assembled
+                            // by statusToastMessage() so it stays byte-identical
+                            // to the footer indicator (same stop-reason phrase,
+                            // same pluralization).
                             showToast(
                               "Autocontinue",
-                              `${watchStateLabel(result.state.state)} · ${result.state.injections} injection${result.state.injections === 1 ? "" : "s"}${stopSuffix}`,
+                              statusToastMessage(result.state),
                               "info",
                             )
                           } else {

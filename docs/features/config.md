@@ -83,6 +83,10 @@
 
 | 键 | 非法输入 | 行为 |
 |---|---|---|
+| 所有配置键 | **类型与期望不符**（例如数值键写字符串、字符串键写数字、布尔键写字符串、数组键写非数组） | **回退到基础值**并告警 |
+| 所有数值键 | **非有限数值**（`Infinity` / `NaN`） | **回退到基础值**并告警 |
+| `message` / `finalCheckMessage` | **空字符串**（这两项不允许为空） | **回退到基础值**并告警 |
+| 整个配置文件 | **不是配置对象**（数组、字符串、数字、布尔值等） | **回退到基础值**并告警（`null` / `undefined` 表示文件不存在或读取、解析失败已另行诊断，保持静默） |
 | `startTime` / `endTime` | 不是 `HH:MM`（时 > 23 或分 > 59） | **回退为空**（= 不限制每日窗口）并告警 |
 | `markerRegex` | 源长度 > 1024 | **忽略该值**并告警（回落到 `completionMarkers`） |
 | `markerRegex` | 含**嵌套量词**（ReDoS 风险） | **忽略该值**并告警 |
@@ -97,11 +101,12 @@
 | `verifyTimeoutMs` | 低于 `1000` / 高于 `3600000` | **钳到边界** 并告警 |
 | `verifyMaxIterations` | 负值 / 高于 `10000` | **钳到边界** 并告警 |
 
-**不变式（v0.5.6 起）**：任何**被静默改写**的配置值，都必须产生**恰好一条** `console.error`，诊断信息含**键名、原始值、生效值**。**本来就合法的值不产生任何诊断**——下列值全部静默：
+**不变式（v0.5.6 起，v0.5.8 补齐）**：任何**被静默改写**的配置值，以及任何**写了但不可能生效**的配置值（因**类型不匹配**、**非有限数值**、必填消息为空而被**静默忽略**的值），都必须产生**恰好一条** `console.error`，逐键诊断含**键名、原始值、生效值**；整个配置文件不是配置对象时产生一条不含键名的文件级诊断。**本来就合法的值不产生任何诊断**——下列值全部静默：
 
 - `intervalMs = 0`（文档化语义：关闭周期检查）、`userGraceMs = 0`（不等）、`watchTimeoutMs = 0`（无墙钟上限）、`selfEchoWindowMs = 0`、`maxConsecutive = 0`（不限次）、`verifyMaxIterations = 0`（不限轮）
 - `intervalMs = 1000`（1s 地板本身）、`verifyTimeoutMs = 1000` / `3600000`、`verifyMaxIterations = 10000`、各 `2^31-1` 上限本身
 - 任何数组键**不含空串**时
+- 合法空串：`startTime` / `endTime`（关闭窗口）、`markerRegex`（不用自定义正则）、`verifyCommand`（关闭验证驱动 Loop）、`verifyCwd`（使用会话/项目目录）、`abortSentinelTag` / `pauseSentinelTag`（关闭哨兵）、`escalationReassessMessage` / `escalationRootCauseMessage`（不追加对应提示）、`frustrationMessage`（不追加挫败感提醒）
 
 > JSONC 解析器的**尾逗号前瞻会跳过注释**：`1, // 说明\n}` 这类写法不再被当成语法错误。
 >

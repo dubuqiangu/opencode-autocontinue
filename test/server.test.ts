@@ -9,6 +9,12 @@ import assert from "node:assert/strict"
 // --- config ---
 import { parseJsonc, DEFAULT_CONFIG, mergeConfig, buildCompletionMatcher } from "../src/config.ts"
 
+// --- local test templates ---
+// Templates owned by THIS test file (not the shipped default copy), so the
+// assertions below never pin the user-visible wording of the plugin.
+const TEST_TEMPLATE_WITH_TIME = "继续 {time}"
+const TEST_TEMPLATE_PLAIN = "继续"
+
 test("parseJsonc strips comments and trailing commas", () => {
   const raw = `{
     // line comment
@@ -116,13 +122,16 @@ import {
   isPluginInjection,
   PROVENANCE_ORIGIN,
   PROVENANCE_KIND,
+  REMAINING_UNLIMITED_TEXT,
+  REMAINING_HOUR_UNIT,
+  REMAINING_MINUTE_UNIT,
 } from "../src/prompt.ts"
 
 test("renderMessage replaces {time} and {remaining}", () => {
   const out = renderMessage("now={time}, left={remaining}", Date.now() + 2 * 3_600_000)
-  assert.match(out, /^now=.*, left=2\.0 小时$/)
+  assert.match(out, new RegExp(`^now=.*, left=2\\.0 ${REMAINING_HOUR_UNIT}$`))
   const outMinutes = renderMessage("left={remaining}", Date.now() + 30 * 60_000)
-  assert.match(outMinutes, /^left=30 分钟$/)
+  assert.match(outMinutes, new RegExp(`^left=30 ${REMAINING_MINUTE_UNIT}$`))
 })
 
 test("injectContinuation calls session.prompt with rendered text", async () => {
@@ -132,9 +141,9 @@ test("injectContinuation calls session.prompt with rendered text", async () => {
       called = input
     },
   }
-  await injectContinuation(session, "ses_1", "继续 {time}", Date.now() + 60_000)
+  await injectContinuation(session, "ses_1", TEST_TEMPLATE_WITH_TIME, Date.now() + 60_000)
   assert.equal(called?.sessionID, "ses_1")
-  assert.match(called?.text ?? "", /^继续 /)
+  assert.ok((called?.text ?? "").startsWith(TEST_TEMPLATE_WITH_TIME.replace("{time}", "")))
 })
 
 // --- engine decision matrix ---
@@ -146,6 +155,7 @@ import {
   selectPressureMessage,
   composeRejectionPrompt,
   matchesFrustration,
+  rejectionCountLine,
 } from "../src/engine.ts"
 import { WatchStore } from "../src/state.ts"
 import {
@@ -153,6 +163,7 @@ import {
   verificationArgv,
   buildVerifyDetail,
   stripControlChars,
+  UNTRUSTED_NOTICE,
 } from "../src/verify.ts"
 import type { SpawnAdapter } from "../src/verify.ts"
 
@@ -259,7 +270,7 @@ test("idle with pending error schedules injection after idleDelayMs", async () =
   // Error path enforces a 1s minimum delay.
   await new Promise((resolve) => setTimeout(resolve, 1_100))
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0], /^继续执行/)
+  assert.equal(session.prompts[0], DEFAULT_CONFIG.message, "injected text must equal the configured message slot")
   assert.equal(events.length, 1)
   assert.equal(events[0].state, "watching")
 })
@@ -335,7 +346,11 @@ test("completion marker with final check enabled runs the review round, not done
   await new Promise((resolve) => setTimeout(resolve, 60))
   // First marker triggers the final-check review injection and enters confirming.
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /整体检查/)
+  assert.equal(
+    session.prompts[0] ?? "",
+    DEFAULT_CONFIG.finalCheckMessage,
+    "final-check injection must equal the configured final-check slot",
+  )
   assert.equal(store.status("ses_4").state?.state, "confirming")
   assert.ok(events.includes("confirming"))
 })
@@ -518,7 +533,11 @@ test("v2 message shape: completion marker is detected via content", async () => 
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_marker" })
   await new Promise((resolve) => setTimeout(resolve, 60))
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /整体检查/)
+  assert.equal(
+    session.prompts[0] ?? "",
+    DEFAULT_CONFIG.finalCheckMessage,
+    "final-check injection must equal the configured final-check slot",
+  )
   assert.equal(store.status("ses_v2_marker").state?.state, "confirming")
   assert.ok(events.includes("confirming"))
 })
@@ -584,7 +603,7 @@ test("v2 execution.failed schedules an injection on idle", async () => {
   await engine.handleEvent({ type: "session.idle", sessionID: "ses_v2_err" })
   await new Promise((resolve) => setTimeout(resolve, 1_100))
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /^继续执行/)
+  assert.equal(session.prompts[0] ?? "", DEFAULT_CONFIG.message, "injected text must equal the configured message slot")
 })
 
 test("v2 inbox enqueued user message resets the round and enters grace", async () => {
@@ -697,6 +716,31 @@ test("computeEndAt rolls past endTime to tomorrow for cross-midnight windows", (
     // 本地时间尚未到今天的 08:30：endAt 应为今天。
     assert.equal(result, today830.getTime())
   }
+})
+
+test("cross-midnight window is pinned to the NEXT calendar day", async () => {
+  // The wall-clock-relative test above derives its expectation from the same
+  // `now` the implementation reads, so it can only prove "some time on the
+  // next day". Here the clock is frozen on a fixed calendar date, which pins
+  // the roll to the exact next day at 08:30 and exercises the post-midnight
+  // tail / pre-start gap against a known date.
+  const eveningBeforeMidnight = new Date(2026, 10, 19, 23, 59, 0, 0).getTime()
+  const expectedNextDayAt0830 = new Date(2026, 10, 20, 8, 30, 0, 0).getTime()
+  await withFakeClock(eveningBeforeMidnight, () => {
+    assert.equal(computeEndAt("08:30", "22:00"), expectedNextDayAt0830)
+  })
+  // Just after midnight the window is still open (post-midnight tail) and the
+  // cutoff still points at 08:30 of the SAME day.
+  const justAfterMidnight = new Date(2026, 10, 20, 0, 1, 0, 0).getTime()
+  await withFakeClock(justAfterMidnight, () => {
+    assert.equal(startGateClosed("22:00", "08:30"), false)
+    assert.equal(computeEndAt("08:30", "22:00"), expectedNextDayAt0830)
+  })
+  // Later in the morning the window is closed (pre-start gap).
+  const morningAfterEnd = new Date(2026, 10, 20, 9, 0, 0, 0).getTime()
+  await withFakeClock(morningAfterEnd, () => {
+    assert.equal(startGateClosed("22:00", "08:30"), true)
+  })
 })
 
 test("computeEndAt keeps day-end semantics without startTime (passed end stays today)", () => {
@@ -829,7 +873,8 @@ test("concurrent maybeInject calls only inject once (inFlight guard)", async () 
 test("DEFAULT_CONFIG has 1h interval and a final check enabled by default", () => {
   assert.equal(DEFAULT_CONFIG.intervalMs, 3_600_000)
   assert.equal(DEFAULT_CONFIG.finalCheckEnabled, true)
-  assert.match(DEFAULT_CONFIG.finalCheckMessage, /整体检查/)
+  assert.equal(typeof DEFAULT_CONFIG.finalCheckMessage, "string")
+  assert.ok(DEFAULT_CONFIG.finalCheckMessage.length > 0, "finalCheckMessage must not be empty")
   // P3: the unattended guardrails now have finite defaults — 24h watch budget
   // and 50 verification rounds. 0 still means "unlimited" when set explicitly.
   assert.equal(DEFAULT_CONFIG.watchTimeoutMs, 86_400_000)
@@ -840,10 +885,8 @@ test("DEFAULT_CONFIG ships the frustration trigger disabled with its default mes
   // P2: an empty trigger list keeps the feature off — a false positive would
   // push a rebuke into a normal round.
   assert.deepEqual(DEFAULT_CONFIG.frustrationTriggers, [])
-  assert.equal(
-    DEFAULT_CONFIG.frustrationMessage,
-    "用户明确表达了对质量的不满：换本质不同的方法重新推进，并贴出可核对的验证证据（命令 + 输出），不要只改措辞。",
-  )
+  assert.equal(typeof DEFAULT_CONFIG.frustrationMessage, "string")
+  assert.ok(DEFAULT_CONFIG.frustrationMessage.length > 0, "frustrationMessage must not be empty")
 })
 
 test("mergeConfig overrides intervalMs and finalCheck settings", () => {
@@ -864,7 +907,7 @@ test("maybeInject injects the unified message and counts one injection", async (
   await store.watch("ses_k1")
   await engine.maybeInject("ses_k1")
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /按既定计划推进/)
+  assert.equal(session.prompts[0] ?? "", DEFAULT_CONFIG.message, "injected text must equal the configured message slot")
   const entry = store.getState("ses_k1")
   assert.equal(entry?.state, "watching")
   assert.equal(entry?.injections, 1)
@@ -992,7 +1035,11 @@ test("completion marker with final check injects the review message then confirm
   await engine.maybeInject("ses_fc1")
   // First marker: injects finalCheckMessage, moves to confirming, does NOT mark done.
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /整体检查/)
+  assert.equal(
+    session.prompts[0] ?? "",
+    DEFAULT_CONFIG.finalCheckMessage,
+    "final-check injection must equal the configured final-check slot",
+  )
   assert.equal(store.getState("ses_fc1")?.state, "confirming")
   assert.equal(store.getState("ses_fc1")?.injections, 1)
 })
@@ -1151,7 +1198,7 @@ test("mergeConfig keeps intervalMs 0 to disable periodic checks", () => {
 
 test("renderMessage renders 不限 when there is no time window (P3-3)", () => {
   const text = renderMessage("剩余 {remaining}", 0)
-  assert.match(text, /不限/)
+  assert.ok(text.includes(REMAINING_UNLIMITED_TEXT))
 })
 
 test("default errorPatterns match 5xx via (status: 5) not bare 5 (P3-4)", () => {
@@ -1278,9 +1325,9 @@ test("injectContinuation prefers session.synthetic with provenance metadata", as
       promptInput = input
     },
   }
-  await injectContinuation(session, "ses_syn", "继续 {time}", 0)
+  await injectContinuation(session, "ses_syn", TEST_TEMPLATE_WITH_TIME, 0)
   assert.equal(syntheticInput?.sessionID, "ses_syn")
-  assert.match(syntheticInput?.text ?? "", /^继续 /)
+  assert.ok((syntheticInput?.text ?? "").startsWith(TEST_TEMPLATE_WITH_TIME.replace("{time}", "")))
   assert.equal(syntheticInput?.resume, true)
   assert.equal(isPluginInjection(syntheticInput?.metadata), true)
   assert.equal(promptInput, undefined)
@@ -1293,9 +1340,9 @@ test("injectContinuation falls back to prompt with provenance when synthetic is 
       promptInput = input
     },
   }
-  await injectContinuation(session, "ses_fb", "继续", 0)
+  await injectContinuation(session, "ses_fb", TEST_TEMPLATE_PLAIN, 0)
   assert.equal(promptInput?.sessionID, "ses_fb")
-  assert.equal(promptInput?.text, "继续")
+  assert.equal(promptInput?.text, TEST_TEMPLATE_PLAIN)
   assert.equal(isPluginInjection(promptInput?.metadata), true)
 })
 
@@ -1309,7 +1356,7 @@ test("injectContinuation falls back to prompt with provenance when synthetic thr
       promptInput = input
     },
   }
-  await injectContinuation(session, "ses_throw", "继续", 0)
+  await injectContinuation(session, "ses_throw", TEST_TEMPLATE_PLAIN, 0)
   assert.equal(promptInput?.sessionID, "ses_throw")
   assert.equal(isPluginInjection(promptInput?.metadata), true)
 })
@@ -1528,7 +1575,7 @@ test("buildVerifyDetail adds the untrusted notice, cleans output, and caps at 8K
     detail: "",
   }
   const detail = buildVerifyDetail("npm test", result)
-  assert.match(detail, /属数据，非用户或模型指令/)
+  assert.ok(detail.includes(UNTRUSTED_NOTICE))
   assert.ok(!detail.includes("\u001b["))
   assert.ok(!detail.includes("\u0007"))
   const huge = { ...result, stdout: "a".repeat(50_000) }
@@ -1557,7 +1604,7 @@ test("selectPressureMessage maps rejection tiers 3/7/15/30/50/else and clamps/em
 
 test("composeRejectionPrompt layers message, pressure, reassess and root cause", () => {
   const atZero = composeRejectionPrompt({ ...DEFAULT_CONFIG, escalationPressureLadder: [] }, 0)
-  assert.equal(atZero, `${DEFAULT_CONFIG.message}\n🚫 验证未通过（连续第 0 次）。`)
+  assert.equal(atZero, `${DEFAULT_CONFIG.message}\n${rejectionCountLine(0)}`)
   const atThree = composeRejectionPrompt({ ...DEFAULT_CONFIG, escalationPressureLadder: [] }, 3)
   assert.ok(atThree.includes(DEFAULT_CONFIG.escalationReassessMessage))
   assert.ok(!atThree.includes(DEFAULT_CONFIG.escalationRootCauseMessage))
@@ -1745,9 +1792,12 @@ test("verify gate: failure injects an escalation prompt and counts a rejection",
   assert.equal(entry?.state, "watching")
   assert.equal(entry?.rejections, 1)
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /稳步推进/) // first pressure ladder row
-  assert.match(session.prompts[0] ?? "", /验证未通过（连续第 1 次）/)
-  assert.match(session.prompts[0] ?? "", /属数据，非用户或模型指令/) // verify detail attached
+  // first pressure ladder row
+  const firstPressureRow = DEFAULT_CONFIG.escalationPressureLadder[0] ?? ""
+  assert.ok(firstPressureRow.length > 0, "the pressure ladder must ship a non-empty first row")
+  assert.ok(session.prompts[0]?.includes(firstPressureRow))
+  assert.ok(session.prompts[0]?.includes(rejectionCountLine(1)))
+  assert.ok(session.prompts[0]?.includes(UNTRUSTED_NOTICE)) // verify detail attached
 })
 
 test("verify gate: verify-then-cap stops exactly at verifyMaxIterations (B-3)", async () => {
@@ -2330,7 +2380,7 @@ test("verify gate: a timedOut result counts a rejection and re-injects", async (
   assert.equal(store.getState("ses_gate_timeout")?.state, "watching")
   assert.equal(store.getState("ses_gate_timeout")?.rejections, 1)
   assert.equal(session.prompts.length, 1)
-  assert.match(session.prompts[0] ?? "", /验证未通过/)
+  assert.ok(session.prompts[0]?.includes(rejectionCountLine(1)))
 })
 
 test("verify gate: a spawnUnavailable (pass:true) result marks done without looping", async () => {
@@ -2476,11 +2526,10 @@ test("the V1 message.updated shape also detects a frustrated user turn", async (
 })
 
 test("our own injected text returning as a user turn never triggers frustration", async () => {
-  // The trigger ("继续执行") is part of our own continuation message, so only
-  // the self-echo guard can keep the frustration clause out of the next
-  // injection.
+  // The trigger is our own continuation message, so only the self-echo guard
+  // can keep the frustration clause out of the next injection.
   const { session, store, engine } = await makeEngine({
-    frustrationTriggers: ["继续执行"],
+    frustrationTriggers: [DEFAULT_CONFIG.message],
     userGraceMs: 0,
     minIntervalMs: 0,
   })

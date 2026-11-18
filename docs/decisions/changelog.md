@@ -8,6 +8,7 @@
 
 | 版本 | 日期 | 一句话摘要 |
 |---|---|---|
+| v0.5.8 | 2026-11-19 | 配置层补齐「静默丢弃」诊断（类型不匹配/非有限值/必填空串/非对象文件）；测试文案硬编码清完；`stopReason` 渲染拼装下沉为纯函数；跨午夜窗口补钉住日历日期的单测 |
 | v0.5.7 | 2026-11-09 | 右栏空闲幻影容器 box 使 OMO-Slim↔Stats 间距翻倍；slot render 改返回响应式 thunk，空闲产出 `true` 不占 gap |
 | v0.5.6 | 2026-11-09 | 单引号串改字面量语义（Windows 路径不再报错）、配置钳制诊断对称化、数组剔空告警、侧栏状态标签取代内部枚举、`⏱ starting` 占位、标签表 own-property 守卫、`config.ts` 按职责拆分 |
 | v0.5.5 | 2026-11-08 | 配置解析与诊断加固、错误匹配串统一、回声幂等与时间窗兜底、`roundId` 全局单调、在途锁与每轮缓存拆分、disposed 守卫、final-check 复检、定时器钳制、TUI 纯逻辑抽离、验证进程终止修复、脱敏扫描器扩充 |
@@ -41,6 +42,73 @@
 | v0.2.1 | 2026-10-05 | 新增保活心跳、修 status 报错与图标延迟刷新 |
 | v0.2.0 | 2026-10-04 | TUI 值守块修复、界面全英文化 |
 | 开发阶段 | 2026-10-03 | 骨架 / RPC / 核心 / TUI 实现、文档体系重构、深度审查修复 |
+
+---
+
+## v0.5.8
+
+日期：2026-11-19
+
+本轮是 v0.5.7 之后的**收尾轮**：把上一轮报告里遗留的已知项一次清掉。
+用户可见的行为变更只有一处（配置写错时**会出声**），其余是**可验证性**的提升。
+
+### 修复
+
+**① 配置层补齐「静默丢弃」诊断（`src/config-validate.ts` / `src/config-schema.ts`）**
+
+- v0.5.6 建立的不变式是「任何**被静默改写**的值必产生恰好一条 `console.error`」，
+  但 `mergeConfig` 的守卫式跳过把**类型不匹配**与**非有限数值**整个键**静默丢掉**
+  （保留 base 值、零诊断）——文档承诺了代码没做到的事。
+- v0.5.8 起，合并前先跑一道**类型预检**（新增 `CONFIG_KEY_TYPES`，覆盖 `PluginConfig`
+  全部 30 个键），下列情形一律产生**恰好一条**告警（含键名、原始值、生效值）：
+  - 类型不匹配（number 键写成字符串、string 键写成数字、数组键写成非数组等）；
+  - number 键的非有限值（`NaN` / `±Infinity`；`1e400` 经 `JSON.parse` 会得到 `Infinity`，
+    是**真实可达**的输入）；
+  - `message` / `finalCheckMessage` 的空串（其余 string 键的空串是**合法**语义：
+    窗口关闭、命令为空、哨兵关闭等）；
+  - 整个配置文件不是对象（数组 / 字符串 / 数字 / 布尔）。
+- **生效值零变化**：预检只负责「原本会被静默跳过」的那部分，既有守卫照旧跳过该键，
+  值自然留在 base。已用 HEAD 版 vs 工作区版的**差分探针**逐字节比对 24 组 override 电池，
+  合并结果全部一致、诊断只增不减。
+- `null` / `undefined` 仍**保持静默**——`loadConfig` 用 `null` 表示「文件不存在」，
+  那两种情形已各自诊断过，不能再出声。
+- **未引入配置校验库**：检索现查数据显示 `zod`（44,346★ / MIT）、`joi`（21,169★ / MIT）、
+  `ajv`（14,881★ / MIT）、`valibot`（9,076★ / MIT）、`typebox`（7,040★ / MIT）都能给出
+  「每键一条诊断」，但宿主 SDK 的 `PluginOptions = Readonly<Record<string, any>>`
+  **完全不校验插件配置**，生态无统一约定；本插件只有 1 个运行时依赖、零 devDependencies，
+  引入 schema 库反而是例外。`json5`（7,182★ / MIT）另因**单引号转义语义**与本插件
+  v0.5.6 的「单引号 = 字面量」不一致（其 `escape()` 对单/双引号共用 JSON 转义集）而不采用。
+
+**② v0.5.4 遗留的测试文案硬编码清完（`src/verify.ts` / `src/engine.ts` / `src/prompt.ts`）**
+
+- 出货默认文案与提示语此前以字面量形式散落在 `test/server.test.ts` 的 22 处断言里，
+  改一次文案就要改一次测试，测试于是**锁死了措辞**而不是锁住行为。
+- 现在这些文案从 `src/` 导出为常量（`UNTRUSTED_NOTICE` / `rejectionCountLine` /
+  `REMAINING_UNLIMITED_TEXT` / `REMAINING_HOUR_UNIT` / `REMAINING_MINUTE_UNIT`），
+  断言改为与常量或配置槽比对。`src/` 侧是**纯抽取，字节不变**。
+- 断言强度只增不减：前缀正则（如 `/^继续执行/`）改为**全等**（`=== DEFAULT_CONFIG.message`），
+  半句包含（如 `/属数据，非用户或模型指令/`）改为**整句包含**。
+
+**③ `stopReason` 的渲染拼装下沉为纯函数（`src/tui-logic.ts` / `src/tui.tsx`）**
+
+- footer 指示器与 `/autocontinue status` toast 的文案此前在 JSX 里就地拼装，
+  「原因短语缺失 / 两处文案不一致 / 计数复数化错误」只能靠真人实机才能发现。
+- 现在由 `footerIndicatorLabel(status)` 与 `statusToastMessage(status)` 两个纯函数拼装，
+  并有确定性单测覆盖 5 种状态 × 全部停止原因 × 复数化 × footer/toast 两处一致。
+- 剩余未覆盖的只有**宿主原样渲染**这一层（emoji 宽度、字体、toast 截断）。
+
+### 验证
+
+- `npm test`：380 用例全绿（15 个测试文件；v0.5.7 为 366）。
+- 差分探针：HEAD 版 vs 工作区版的 `mergeConfig` 在 24 组 override 电池上合并结果逐字节相同，
+  诊断只增不减 → 证实「生效值零变化」。
+- `dist/tui.js` 用固定的 esbuild 0.28.2 重打包**幂等**（重跑后 SHA256 不变）→ bundle 与 `src/` 一致。
+- 全仓 61 个跟踪文件：无 BOM / 无 CRLF / 无 U+FFFD。
+- **本轮主动排除**：`watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` **不加** `2^31-1` 上限。
+  取证结论是这三个键**全是纯时间差比较阈值**，代码中无一处进入 `setTimeout` / `setInterval`
+  的延迟参数；引擎侧的 `clampTimerDelay` 已覆盖全部 2 处定时器创建点。加上限**不是修 bug，
+  是改写合法值行为**（如 `watchTimeoutMs: 2592000000` 会被改短导致提前 `watch-timeout`）。
+- 仍需宿主实机验证：跨午夜窗口的真实墙钟行为、验证流程的 TOCTOU、宿主的原样渲染层。
 
 ---
 

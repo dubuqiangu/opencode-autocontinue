@@ -10,6 +10,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 
 import { DEFAULT_CONFIG, mergeConfig, buildCompletionMatcher, type PluginConfig } from "../src/config.ts"
+import { CONFIG_KEY_TYPES } from "../src/config-schema.ts"
 
 /** The string list keys of the config that are sanitized by the merge layer. */
 const STRING_LIST_KEYS = ["completionMarkers", "errorPatterns", "excludePatterns", "excludeTitleKeywords", "escalationPressureLadder", "frustrationTriggers"] as const
@@ -17,7 +18,7 @@ const STRING_LIST_KEYS = ["completionMarkers", "errorPatterns", "excludePatterns
 /** Merge `overrides` over `base` with console.error captured; returns the
  *  merged config and the collected error messages (console.error is always
  *  restored). */
-function mergeWithDiagnostics(overrides: Record<string, unknown>, base: PluginConfig = DEFAULT_CONFIG) {
+function mergeWithDiagnostics(overrides: unknown, base: PluginConfig = DEFAULT_CONFIG) {
   const messages: string[] = []
   const originalError = console.error
   console.error = (...errorArguments: unknown[]) => messages.push(errorArguments.map((argument) => String(argument)).join(" "))
@@ -38,23 +39,136 @@ function assertDroppedEntriesReported(keyName: string, overrides: Record<string,
   assert.ok(messages[0].includes(keyName) && messages[0].includes("1 blank entry"), `the report must name ${keyName} and count its blank entries`)
 }
 
+// --- configuration type preflight diagnostics ---
+
+test("CONFIG_KEY_TYPES covers exactly every PluginConfig key", () => {
+  assert.deepEqual(Object.keys(CONFIG_KEY_TYPES).sort(), Object.keys(DEFAULT_CONFIG).sort())
+})
+
+test("mergeConfig reports every type-mismatched override and keeps the base value", () => {
+  const invalidValueByType = {
+    boolean: "yes",
+    number: "15000",
+    string: 42,
+    nonEmptyString: 42,
+    stringArray: "not-an-array",
+  } as const
+  const customBaseValueByType = {
+    boolean: false,
+    number: 123,
+    string: "BASE",
+    nonEmptyString: "BASE",
+    stringArray: ["BASE"],
+  } as const
+
+  for (const [keyName, expectedType] of Object.entries(CONFIG_KEY_TYPES)) {
+    const invalidValue = invalidValueByType[expectedType]
+    const customBase = {
+      ...DEFAULT_CONFIG,
+      [keyName]: customBaseValueByType[expectedType],
+    } as PluginConfig
+    const { result: customMerge, messages } = mergeWithDiagnostics({ [keyName]: invalidValue }, customBase)
+    assert.equal(messages.length, 1, `${keyName} must produce exactly one diagnostic`)
+    assert.ok(messages[0].includes(`"${keyName}"`), `the diagnostic for ${keyName} must name the key`)
+    assert.equal(
+      (customMerge as unknown as Record<string, unknown>)[keyName],
+      (customBase as unknown as Record<string, unknown>)[keyName],
+      `${keyName} must keep its base value`,
+    )
+
+    const { result: defaultMerge, messages: defaultMessages } = mergeWithDiagnostics({ [keyName]: invalidValue })
+    assert.equal(defaultMessages.length, 1, `${keyName} must produce exactly one diagnostic over the defaults`)
+    assert.ok(defaultMessages[0].includes(`"${keyName}"`), `the diagnostic for ${keyName} must name the key`)
+    assert.equal(
+      (defaultMerge as unknown as Record<string, unknown>)[keyName],
+      (DEFAULT_CONFIG as unknown as Record<string, unknown>)[keyName],
+      `${keyName} must keep its default value`,
+    )
+  }
+})
+
+test("mergeConfig reports every non-finite numeric override and keeps the base value", () => {
+  const numberKeys = [
+    "idleDelayMs",
+    "minIntervalMs",
+    "maxConsecutive",
+    "watchTimeoutMs",
+    "userGraceMs",
+    "intervalMs",
+    "verifyTimeoutMs",
+    "verifyMaxIterations",
+    "selfEchoWindowMs",
+  ] as const
+  for (const keyName of numberKeys) {
+    for (const invalidNumber of [Number.POSITIVE_INFINITY, Number.NaN]) {
+      const { result: merged, messages } = mergeWithDiagnostics({ [keyName]: invalidNumber })
+      assert.equal(messages.length, 1, `${keyName} must produce exactly one diagnostic for ${invalidNumber}`)
+      assert.ok(messages[0].includes(`"${keyName}"`), `the diagnostic for ${keyName} must name the key`)
+      assert.equal(merged[keyName], DEFAULT_CONFIG[keyName], `${keyName} must keep its base value`)
+    }
+  }
+})
+
+test("mergeConfig reports empty required messages and keeps the base value", () => {
+  for (const keyName of ["message", "finalCheckMessage"] as const) {
+    const { result: merged, messages } = mergeWithDiagnostics({ [keyName]: "" })
+    assert.equal(messages.length, 1, `${keyName} must produce exactly one diagnostic`)
+    assert.ok(messages[0].includes(`"${keyName}"`), `the diagnostic for ${keyName} must name the key`)
+    assert.equal(merged[keyName], DEFAULT_CONFIG[keyName], `${keyName} must keep its base value`)
+  }
+})
+
+test("mergeConfig accepts legal empty strings without diagnostics", () => {
+  const legalEmptyStringKeys = [
+    "startTime",
+    "endTime",
+    "markerRegex",
+    "verifyCommand",
+    "verifyCwd",
+    "abortSentinelTag",
+    "pauseSentinelTag",
+    "escalationReassessMessage",
+    "escalationRootCauseMessage",
+    "frustrationMessage",
+  ] as const
+  const { messages } = mergeWithDiagnostics(Object.fromEntries(legalEmptyStringKeys.map((keyName) => [keyName, ""])))
+  assert.deepEqual(messages, [], "legal empty strings must not be reported")
+})
+
+test("mergeConfig reports a config file that is not a configuration object", () => {
+  for (const invalidConfig of [[], "text", 42]) {
+    const { result: merged, messages } = mergeWithDiagnostics(invalidConfig)
+    assert.equal(messages.length, 1, "an invalid config file must produce exactly one diagnostic")
+    assert.ok(messages[0].includes("ignored invalid config file"), "the diagnostic must identify the invalid config file")
+    assert.deepEqual(merged, DEFAULT_CONFIG, "an invalid config file must fall back to the base value")
+  }
+
+  for (const absentConfig of [null, undefined]) {
+    const { result: merged, messages } = mergeWithDiagnostics(absentConfig)
+    assert.equal(messages.length, 0, "an absent config file must remain silent")
+    assert.deepEqual(merged, DEFAULT_CONFIG, "an absent config file must fall back to the base value")
+  }
+})
+
 // --- F4: non-finite numeric overrides fall back to the base value ---
 
 test("mergeConfig falls back to defaults for non-finite numeric overrides", () => {
-  const merged = mergeConfig(DEFAULT_CONFIG, {
+  const { result: merged, messages } = mergeWithDiagnostics({
     idleDelayMs: 1e400, minIntervalMs: -1e400, maxConsecutive: 1e400, userGraceMs: 1e400, intervalMs: 1e400, watchTimeoutMs: 1e400,
     selfEchoWindowMs: 1e400, verifyTimeoutMs: 1e400, verifyMaxIterations: 1e400,
   })
   for (const keyName of ["idleDelayMs", "minIntervalMs", "maxConsecutive", "userGraceMs", "intervalMs", "watchTimeoutMs", "selfEchoWindowMs", "verifyTimeoutMs", "verifyMaxIterations"] as const) {
     assert.equal(merged[keyName], DEFAULT_CONFIG[keyName], `${keyName} must fall back to the default`)
   }
+  assert.equal(messages.length, 9, "every non-finite numeric key must produce exactly one diagnostic")
 })
 
 test("mergeConfig falls back to defaults for NaN numeric overrides", () => {
-  const merged = mergeConfig(DEFAULT_CONFIG, { idleDelayMs: Number.NaN, verifyTimeoutMs: Number.NaN, verifyMaxIterations: Number.NaN })
+  const { result: merged, messages } = mergeWithDiagnostics({ idleDelayMs: Number.NaN, verifyTimeoutMs: Number.NaN, verifyMaxIterations: Number.NaN })
   assert.equal(merged.idleDelayMs, DEFAULT_CONFIG.idleDelayMs)
   assert.equal(merged.verifyTimeoutMs, DEFAULT_CONFIG.verifyTimeoutMs)
   assert.equal(merged.verifyMaxIterations, DEFAULT_CONFIG.verifyMaxIterations)
+  assert.equal(messages.length, 3, "every NaN numeric key must produce exactly one diagnostic")
 })
 
 test("mergeConfig still applies a finite numeric override", () => {
@@ -91,9 +205,10 @@ test("an explicit 0 still means unlimited for the watch budget and the verify ca
 })
 
 test("a non-finite watch budget or verify cap falls back to the new defaults", () => {
-  const merged = mergeConfig(DEFAULT_CONFIG, { watchTimeoutMs: Number.POSITIVE_INFINITY, verifyMaxIterations: Number.NaN })
+  const { result: merged, messages } = mergeWithDiagnostics({ watchTimeoutMs: Number.POSITIVE_INFINITY, verifyMaxIterations: Number.NaN })
   assert.equal(merged.watchTimeoutMs, DEFAULT_CONFIG.watchTimeoutMs)
   assert.equal(merged.verifyMaxIterations, DEFAULT_CONFIG.verifyMaxIterations)
+  assert.equal(messages.length, 2, "every non-finite numeric key must produce exactly one diagnostic")
 })
 
 // --- P2: frustration trigger merging ---
@@ -119,14 +234,19 @@ test("mergeConfig honors an explicit empty frustration trigger list (feature off
   assert.deepEqual(merged.frustrationTriggers, [])
 })
 
-test("mergeConfig ignores a non-array frustration trigger override", () => {
-  const merged = mergeConfig(DEFAULT_CONFIG, { frustrationTriggers: "不满意" })
+test("mergeConfig ignores a non-array frustration trigger override and reports it", () => {
+  const { result: merged, messages } = mergeWithDiagnostics({ frustrationTriggers: "不满意" })
   assert.deepEqual(merged.frustrationTriggers, [])
+  assert.equal(messages.length, 1, "the ignored override must produce exactly one diagnostic")
+  assert.ok(messages[0].includes('"frustrationTriggers"'), "the diagnostic must name the key")
 })
 
 test("mergeConfig overrides the frustration message with a string only", () => {
   assert.equal(mergeConfig(DEFAULT_CONFIG, { frustrationMessage: "换个方法" }).frustrationMessage, "换个方法")
-  assert.equal(mergeConfig(DEFAULT_CONFIG, { frustrationMessage: 42 }).frustrationMessage, DEFAULT_CONFIG.frustrationMessage)
+  const { result: merged, messages } = mergeWithDiagnostics({ frustrationMessage: 42 })
+  assert.equal(merged.frustrationMessage, DEFAULT_CONFIG.frustrationMessage)
+  assert.equal(messages.length, 1, "the ignored override must produce exactly one diagnostic")
+  assert.ok(messages[0].includes('"frustrationMessage"'), "the diagnostic must name the key")
 })
 
 // --- A2: mergeConfig validation layer ---

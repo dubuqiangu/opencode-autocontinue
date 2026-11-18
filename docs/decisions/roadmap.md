@@ -1,8 +1,8 @@
 # 未来扩展与未实现记录
 
 > 事实基线：owner `dubuqiangu`，插件 id `github:dubuqiangu/opencode-autocontinue`。
-> 最近一次带 commit 记录的发布为 v0.5.4（commit `d889fe5`）；**v0.5.5 为本轮发布中**
-> （`package.json` 的 `version` 已是 `0.5.5`，尚未打 commit / tag）。
+> 最近一次带 commit 记录的发布为 v0.5.7（commit `22e965f`）；**v0.5.8 为本轮发布中**
+> （`package.json` 的 `version` 已是 `0.5.8`，尚未打 commit / tag）。
 
 ## 已实现（按版本）
 
@@ -45,16 +45,20 @@
 | v0.5.6 | 标签表 own-property 守卫：`STOP_REASON_LABELS` / `WATCH_STATE_LABELS` 改用 `Object.hasOwn`，修掉 `constructor` / `toString` 等原型链键被渲染成 `function Object() { [native code] }` 的既有缺陷。 |
 | v0.5.6 | 手工验证脚本 `test/config-verify.ts` 改用 `globalConfigPath()`，不再直读 `USERPROFILE` / `HOME`；配置文件缺失与匹配器为 `null` 时给提示而非崩栈。 |
 | v0.5.6 | 结构：`src/config.ts` 按职责拆为 `config-schema.ts` / `config-parse.ts` / `config-validate.ts` + 瘦门面，导出名保持不变。 |
+| v0.5.7 | 右栏 OMO-Slim↔Stats 间距翻倍修复：空闲时不再创建 0 高占位容器 box，slot render 改返回响应式 thunk，空闲产出 `true` 不占 gap。 |
+| v0.5.8 | 配置层补齐「静默丢弃」诊断：新增 `CONFIG_KEY_TYPES` 类型预检（覆盖 `PluginConfig` 全部 30 个键），类型不匹配 / 非有限值 / 必填空串 / 非对象配置文件一律回退基础值并产生**恰好一条**告警，**生效值零变化**。 |
+| v0.5.8 | 测试文案硬编码清完（v0.5.4 遗留项）：`UNTRUSTED_NOTICE` / `rejectionCountLine` / `REMAINING_*` 从 `src/` 导出为常量，断言改为与常量或配置槽比对，断言强度只增不减。 |
+| v0.5.8 | `stopReason` 渲染拼装下沉为纯函数：`footerIndicatorLabel` / `statusToastMessage` 取代 JSX 内联拼装，「原因短语缺失 / footer 与 toast 不一致 / 复数化错误」从此可确定性单测。 |
 
 ## 真机待办
 
-以下三项**仍未做实机验证**（单测与静态守卫已覆盖，但缺真机确认），v0.5.6 仍未做：
+以下三项**仍未做实机验证**（单测与静态守卫已覆盖，但缺真机确认），v0.5.8 仍未做：
 
-| 项 | 说明 |
-|---|---|
-| 跨午夜窗口 | `startGateClosed` 在真实跨午夜会话中的滚动与注入行为。 |
-| 验证 TOCTOU | 验证命令执行期间真实用户消息插入时，陈旧结果是否被正确丢弃。 |
-| stopReason 显示效果 | footer `[AC ⏹ N · <phrase>]` 与 `/autocontinue status` toast 的实际渲染效果。 |
+| 项 | 说明 | v0.5.8 进展 |
+|---|---|---|
+| 跨午夜窗口 | `startGateClosed` 在真实跨午夜会话中的滚动与注入行为。 | 单测补强：新增**钉住日历日期**的用例（时钟固定在 `2026-11-19 23:59` / `2026-11-20 00:01` / `2026-11-20 09:00`），断言 `computeEndAt` 恰落在**下一个日历日**的 08:30 |
+| 验证 TOCTOU | 验证命令执行期间真实用户消息插入时，陈旧结果是否被正确丢弃。 | 未变——需真实并发模拟，本轮不修 |
+| stopReason 显示效果 | footer `[AC ⏹ N · <phrase>]` 与 `/autocontinue status` toast 的实际渲染效果。 | 插件侧**已闭合**：文案拼装下沉为纯函数并有确定性单测；剩余仅**宿主原样渲染**这一层 |
 
 任务明细见 [任务清单](../../tasks.md)。
 
@@ -116,6 +120,35 @@
   本轮明确不加：会改变合法值行为，超出本轮范围。
 
 `src/` 有运行时改动，按仓库发布规则 bump 至 `0.5.6`。
+
+## 本轮 v0.5.8（2026-11-19 发布）
+
+本轮是 v0.5.7 之后的**收尾轮**，主题是「配置写错时不再静默」与「把只能实机验证的渲染收敛成可确定性验证」。
+
+1. 配置层补齐「静默丢弃」诊断：新增 `CONFIG_KEY_TYPES` 类型预检（覆盖 `PluginConfig`
+   全部 30 个键），类型不匹配 / 非有限值 / `message`·`finalCheckMessage` 空串 / 整个配置文件
+   不是对象，一律回退基础值并产生**恰好一条**告警；**生效值零变化**（差分探针逐字节比对证实）。
+2. v0.5.4 遗留的测试文案硬编码清完：用户可见文案从 `src/` 导出为常量，断言改为与常量或
+   配置槽比对，断言强度只增不减。
+3. `stopReason` 的 footer / toast **文案拼装**从 JSX 下沉到 `src/tui-logic.ts` 的两个纯函数，
+   渲染一致性从「只能靠真人实机发现」变成确定性单测。
+4. 跨午夜窗口补一条**钉住日历日期**的单测（既有用例从实现自身读的 `now` 推导期望值，
+   只能证明「落在某个时刻」，钉不住日历日期）。
+
+**本轮没有修的已知问题**（详见 [known-issues.md](known-issues.md)）：
+
+- **三个时长键不加 `2^31-1` 上限**——`watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs`
+  的取证结论是三者**全是纯时间差比较阈值**，代码中无一处进入 `setTimeout` / `setInterval`
+  的延迟参数；引擎侧 `clampTimerDelay` 已覆盖全部 2 处定时器创建点。加上限**不是修 bug，
+  是改写合法值行为**（如 `watchTimeoutMs: 2592000000` 会被改短导致提前 `watch-timeout`）。
+  本轮**明确排除**。
+- **验证流程的 TOCTOU 未做实机验证**——需真实并发模拟，本轮不修。
+- **存储多实例丢行未修**——按会话分键属**破坏性存储布局变更**，需另给迁移与向后兼容方案。
+- **回声时间窗兜底的残留风险未消除**——真实用户消息落在 `selfEchoWindowMs` 窗口内且宿主
+  不提供可提取文本时，仍会被判为回声而未被处理。
+- **宿主原样渲染层未验证**——`stopReason` 在真实字体 / emoji 宽度下的显示效果仍需实机确认。
+
+`src/` 有运行时改动，按仓库发布规则 bump 至 `0.5.8`。
 
 ## 未来方向（尚无明确排期）
 

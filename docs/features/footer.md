@@ -20,6 +20,7 @@
 
 - 会话处于 `stopped` 时，UI 显示**人类可读的停止原因短语**（英文，如 `injection cap`、`window closed`），**不直接暴露 `stopReason` 的原始枚举值**（`injection-cap` / `window-closed` / `verify-limit` …）。
 - 文案出现在 footer 的已停止指示与 `/autocontinue status` 的命令 toast（stopped 轮追加 ` · <phrase>`）；原因随 `state.changed` 事件携带的 `stopReason` 字段实时写回。
+- **两处文案由同一组纯函数拼装**（v0.5.8）：`src/tui-logic.ts` 的 `footerIndicatorLabel(status)` 与 `statusToastMessage(status)` 负责 footer 指示与 status toast 的文案拼装，JSX 只负责渲染。因此「原因短语缺失 / 两处文案不一致 / 计数复数化错误」有确定性单测覆盖（5 种状态 × 全部停止原因 × 复数化 × 两处一致）；**未覆盖的只剩宿主原样渲染层**（emoji 宽度、字体、toast 截断），仍需实机确认。
 
 **8 个停止原因短语对照表（v0.5.3 补齐 `title excluded`）：**
 

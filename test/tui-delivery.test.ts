@@ -25,6 +25,8 @@ import {
   watchStateLabel,
   formatDuration,
   mergeWatchState,
+  footerIndicatorLabel,
+  statusToastMessage,
 } from "../src/tui-logic.ts"
 import type { WatchStatusView, WatchStateChanged } from "../src/tui-logic.ts"
 
@@ -200,31 +202,42 @@ test("the sidebar row and the status toast render the state through watchStateLa
     source.includes("watchStateLabel(status.state)"),
     "the sidebar state row must go through watchStateLabel",
   )
+  // The toast body is assembled by statusToastMessage() in src/tui-logic.ts,
+  // which resolves the state label through the very same map.
   assert.ok(
-    source.includes("watchStateLabel(result.state.state)"),
-    "the status toast must go through watchStateLabel",
+    source.includes("statusToastMessage(result.state)"),
+    "the status toast must go through statusToastMessage",
+  )
+  const logic = readRepo("src/tui-logic.ts")
+  assert.ok(
+    logic.includes("watchStateLabel(status.state)"),
+    "the toast body must resolve the state label through watchStateLabel",
   )
 })
 
-test("footer indicator renders the stop reason phrase and omits it when absent", () => {
+test("the footer indicator and the status toast delegate their copy to the pure logic module", () => {
   const source = readRepo("src/tui.tsx")
+  const logic = readRepo("src/tui-logic.ts")
   assert.ok(
-    source.includes("[AC ⏹ ${status.injections} · ${phrase}]"),
+    source.includes("footerIndicatorLabel(status)"),
+    "the footer label must be assembled by footerIndicatorLabel",
+  )
+  assert.ok(
+    logic.includes("[AC ⏹ ${status.injections} · ${phrase}]"),
     "the footer label must render [AC ⏹ N · phrase]",
   )
   assert.ok(
-    source.includes("[AC ⏹ ${status.injections}]"),
+    logic.includes("[AC ⏹ ${status.injections}]"),
     "the footer label must fall back to [AC ⏹ N] when there is no stop reason",
   )
-})
-
-test("the /autocontinue status toast includes the stop reason phrase", () => {
-  const source = readRepo("src/tui.tsx")
   assert.ok(
-    source.includes("stopReasonLabel(result.state.stopReason)"),
-    "the status toast must resolve the stop reason phrase",
+    logic.includes("` · ${phrase}`"),
+    "the status toast must append the stop reason phrase",
   )
-  assert.ok(source.includes("` · ${stopPhrase}`"), "the status toast must append the stop reason phrase")
+  assert.ok(
+    logic.includes("stopReasonLabel(status.stopReason)"),
+    "the pure logic module must resolve the stop reason phrase",
+  )
 })
 
 test("the sidebar block still renders no terminal state and no stop reason", () => {
@@ -252,8 +265,12 @@ test("dist/tui.js carries the stop-reason handling", () => {
     "the bundle footer must resolve the stop reason phrase",
   )
   assert.ok(
-    bundle.includes("stopReasonLabel(result.state.stopReason)"),
-    "the bundle status toast must resolve the stop reason phrase",
+    bundle.includes("footerIndicatorLabel(status)"),
+    "the bundle footer must assemble its label through footerIndicatorLabel",
+  )
+  assert.ok(
+    bundle.includes("statusToastMessage(result.state)"),
+    "the bundle status toast must assemble its body through statusToastMessage",
   )
 })
 
@@ -275,6 +292,14 @@ test("dist/tui.js is not a stale build (stop-reason helper is inside the bundle)
   assert.ok(
     bundle.includes("formatDuration"),
     "dist/tui.js lacks formatDuration — stale bundle, run npm run build:tui",
+  )
+  assert.ok(
+    bundle.includes("footerIndicatorLabel"),
+    "dist/tui.js lacks footerIndicatorLabel — stale bundle, run npm run build:tui",
+  )
+  assert.ok(
+    bundle.includes("statusToastMessage"),
+    "dist/tui.js lacks statusToastMessage — stale bundle, run npm run build:tui",
   )
 })
 
@@ -470,4 +495,129 @@ test("the refreshStatus catch branch never calls updateStatus", () => {
     functionBody.includes("updateStatus(sessionID, undefined)"),
     "the success path must still remove the entry for a session that is no longer watched",
   )
+})
+
+// --- footerIndicatorLabel / statusToastMessage: the assembled copy ---
+//
+// The user-visible strings of the footer indicator and the /autocontinue
+// status toast are assembled by pure functions in src/tui-logic.ts, so the
+// exact bytes are asserted here instead of being scraped out of the JSX.
+// Three failure modes are locked down:
+//   - a missing stop-reason phrase (the suffix must disappear entirely),
+//   - a footer/toast disagreement (both must show the very same phrase),
+//   - a broken pluralization ("1 injection" vs. "0/2 injections").
+
+test("footerIndicatorLabel renders the exact label of every watch state", () => {
+  const cases: Array<{ state: WatchStatusView["state"]; expected: string }> = [
+    { state: "watching", expected: "[AC ●]" },
+    { state: "confirming", expected: "[AC ●]" },
+    { state: "paused", expected: "[AC ⏸]" },
+    { state: "done", expected: "[AC ✓]" },
+  ]
+  for (const { state, expected } of cases) {
+    const label = footerIndicatorLabel(watchStatusView({ state, injections: 3 }))
+    assert.equal(label, expected, `the footer label of state "${state}" must be "${expected}"`)
+  }
+  // A stopped round is the one state that carries the injection count and
+  // the stop-reason phrase.
+  const stoppedLabel = footerIndicatorLabel(
+    watchStatusView({ state: "stopped", injections: 3, stopReason: "injection-cap" }),
+  )
+  assert.equal(stoppedLabel, "[AC ⏹ 3 · injection cap]")
+})
+
+test("footerIndicatorLabel returns null when the session is not watched", () => {
+  assert.equal(footerIndicatorLabel(undefined), null, "an unwatched session must render no footer label")
+})
+
+test("footerIndicatorLabel and statusToastMessage show the same phrase for every stop reason", () => {
+  for (const reason of STOP_REASONS) {
+    const phrase = STOP_REASON_LABELS[reason]
+    const status = watchStatusView({ state: "stopped", injections: 3, stopReason: reason })
+    const footerLabel = footerIndicatorLabel(status)
+    const toastMessage = statusToastMessage(status)
+    assert.ok(
+      footerLabel !== null && footerLabel.includes(phrase),
+      `the footer label of "${reason}" must contain the phrase "${phrase}"`,
+    )
+    assert.ok(
+      toastMessage.includes(phrase),
+      `the toast body of "${reason}" must contain the phrase "${phrase}"`,
+    )
+    // Both surfaces must name the reason with the very same wording.
+    assert.ok(
+      toastMessage.endsWith(` · ${phrase}`),
+      `the toast body of "${reason}" must end with the phrase "${phrase}"`,
+    )
+  }
+})
+
+test("statusToastMessage pluralizes the injection count", () => {
+  const cases: Array<{ injections: number; expected: string }> = [
+    { injections: 0, expected: "on watch · 0 injections" },
+    { injections: 1, expected: "on watch · 1 injection" },
+    { injections: 2, expected: "on watch · 2 injections" },
+  ]
+  for (const { injections, expected } of cases) {
+    const message = statusToastMessage(watchStatusView({ state: "watching", injections }))
+    assert.equal(message, expected, `${injections} injections must render as "${expected}"`)
+  }
+})
+
+test("an unknown stop reason drops the phrase from both surfaces", () => {
+  const status = watchStatusView({ state: "stopped", injections: 3, stopReason: "not-a-stop-reason" })
+  assert.equal(
+    footerIndicatorLabel(status),
+    "[AC ⏹ 3]",
+    "an unknown stop reason must leave the footer label without a phrase suffix",
+  )
+  assert.equal(
+    statusToastMessage(status),
+    "stopped · 3 injections",
+    "an unknown stop reason must leave the toast body without a phrase suffix",
+  )
+})
+
+test("a missing stop reason drops the phrase from both surfaces", () => {
+  const status = watchStatusView({ state: "stopped", injections: 3 })
+  assert.equal(footerIndicatorLabel(status), "[AC ⏹ 3]")
+  assert.equal(statusToastMessage(status), "stopped · 3 injections")
+})
+
+test("a non-stopped state never carries a stop-reason phrase", () => {
+  for (const state of ["watching", "confirming", "paused", "done"] as const) {
+    const status = watchStatusView({ state, injections: 2, stopReason: "injection-cap" })
+    const toastMessage = statusToastMessage(status)
+    assert.ok(
+      !toastMessage.includes(STOP_REASON_LABELS["injection-cap"]),
+      `the toast body of state "${state}" must not carry a stop-reason phrase`,
+    )
+    assert.ok(
+      !toastMessage.endsWith(" · injection cap"),
+      `the toast body of state "${state}" must not end with a stop-reason phrase`,
+    )
+  }
+})
+
+test("the footer label and the toast body agree on the stop phrase", () => {
+  for (const reason of STOP_REASONS) {
+    const status = watchStatusView({ state: "stopped", injections: 3, stopReason: reason })
+    const footerLabel = footerIndicatorLabel(status) ?? ""
+    const toastMessage = statusToastMessage(status)
+    const phrase = STOP_REASON_LABELS[reason]
+    assert.ok(footerLabel.includes(phrase), `the footer label must contain "${phrase}"`)
+    assert.ok(toastMessage.includes(phrase), `the toast body must contain "${phrase}"`)
+    // Both surfaces must carry the phrase as their final segment; the footer
+    // only wraps it in the closing bracket of "[AC ⏹ N · phrase]".
+    assert.equal(
+      toastMessage.slice(toastMessage.indexOf(phrase)),
+      phrase,
+      `the toast body must spell the reason of "${reason}" exactly like the label map`,
+    )
+    assert.equal(
+      footerLabel.slice(footerLabel.indexOf(phrase)),
+      `${phrase}]`,
+      `the footer label must spell the reason of "${reason}" exactly like the label map`,
+    )
+  }
 })

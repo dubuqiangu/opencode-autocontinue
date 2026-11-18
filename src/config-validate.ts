@@ -4,6 +4,7 @@
 // value is reported exactly once on stderr.
 
 import {
+  CONFIG_KEY_TYPES,
   DEFAULT_CONFIG,
   MAX_MARKER_REGEX_SOURCE_LENGTH,
   MAX_TIMER_DELAY_MS,
@@ -169,10 +170,85 @@ function clampedVerifyIterations(value: number, keyName: string): number {
   return value
 }
 
+/** Render a config value for a diagnostic message. Strings are quoted so a
+ *  numeric-looking string stays distinguishable from a number; NaN and
+ *  Infinity print as-is (JSON.stringify would turn them into "null"). */
+function describeConfigValue(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value)
+  if (typeof value === "number") return String(value)
+  if (typeof value === "boolean") return String(value)
+  if (value === null) return "null"
+  if (value === undefined) return "undefined"
+  try {
+    const serializedValue = JSON.stringify(value)
+    return serializedValue === undefined ? String(value) : serializedValue
+  } catch {
+    return String(value)
+  }
+}
+
+/** Report an override that cannot take effect. Exactly one message per key,
+ *  naming the key, the value the user wrote and the value that stays in
+ *  effect. */
+function reportIgnoredOverride(
+  keyName: string,
+  originalValue: unknown,
+  effectiveValue: unknown,
+  expectation: string,
+): void {
+  console.error(
+    `[opencode-autocontinue] ignored invalid config "${keyName}": expected ${expectation}, got ${describeConfigValue(originalValue)}; using ${describeConfigValue(effectiveValue)} instead`,
+  )
+}
+
 export function mergeConfig(base: PluginConfig, raw: unknown): PluginConfig {
-  if (!raw || typeof raw !== "object") return { ...base }
+  if (raw === null || raw === undefined) return { ...base }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    const describedRaw = Array.isArray(raw) ? "an array" : describeConfigValue(raw)
+    console.error(
+      `[opencode-autocontinue] ignored invalid config file: expected a configuration object, got ${describedRaw}; using the previous configuration instead`,
+    )
+    return { ...base }
+  }
+  const rawPrototype = Object.getPrototypeOf(raw)
+  if (rawPrototype !== Object.prototype && rawPrototype !== null) {
+    console.error(
+      `[opencode-autocontinue] ignored invalid config file: expected a configuration object, got ${describeConfigValue(raw)}; using the previous configuration instead`,
+    )
+    return { ...base }
+  }
   const overrides = raw as Record<string, unknown>
   const merged: PluginConfig = { ...base }
+  const effectiveValues = base as unknown as Record<string, unknown>
+  for (const [keyName, expectedType] of Object.entries(CONFIG_KEY_TYPES)) {
+    const originalValue = overrides[keyName]
+    if (originalValue === undefined) continue
+    const expectation = expectedType === "boolean"
+      ? "a boolean"
+      : expectedType === "number"
+        ? "a number"
+        : expectedType === "string"
+          ? "a string"
+          : expectedType === "nonEmptyString"
+            ? "a non-empty string"
+            : "an array of strings"
+    const hasExpectedType = expectedType === "boolean"
+      ? typeof originalValue === "boolean"
+      : expectedType === "number"
+        ? typeof originalValue === "number"
+        : expectedType === "string"
+          ? typeof originalValue === "string"
+          : expectedType === "nonEmptyString"
+            ? typeof originalValue === "string" && originalValue.length > 0
+            : Array.isArray(originalValue)
+    if (hasExpectedType) {
+      if (expectedType === "number" && !Number.isFinite(originalValue)) {
+        reportIgnoredOverride(keyName, originalValue, effectiveValues[keyName], "a finite number")
+      }
+      continue
+    }
+    reportIgnoredOverride(keyName, originalValue, effectiveValues[keyName], expectation)
+  }
   if (typeof overrides.enabled === "boolean") merged.enabled = overrides.enabled
   if (typeof overrides.message === "string" && overrides.message) merged.message = overrides.message
   if (typeof overrides.startTime === "string") {

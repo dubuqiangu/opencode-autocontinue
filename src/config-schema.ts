@@ -77,6 +77,42 @@ export interface PluginConfig {
   frustrationMessage: string
 }
 
+/** The JSON type every config key expects. The merge layer uses it to report
+ *  overrides that cannot possibly take effect instead of dropping them
+ *  silently. */
+export const CONFIG_KEY_TYPES = {
+  enabled: "boolean",
+  finalCheckEnabled: "boolean",
+  observeToolFailures: "boolean",
+  idleDelayMs: "number",
+  minIntervalMs: "number",
+  maxConsecutive: "number",
+  watchTimeoutMs: "number",
+  userGraceMs: "number",
+  intervalMs: "number",
+  verifyTimeoutMs: "number",
+  verifyMaxIterations: "number",
+  selfEchoWindowMs: "number",
+  message: "nonEmptyString",
+  startTime: "string",
+  endTime: "string",
+  markerRegex: "string",
+  finalCheckMessage: "nonEmptyString",
+  verifyCommand: "string",
+  verifyCwd: "string",
+  abortSentinelTag: "string",
+  pauseSentinelTag: "string",
+  escalationReassessMessage: "string",
+  escalationRootCauseMessage: "string",
+  frustrationMessage: "string",
+  completionMarkers: "stringArray",
+  errorPatterns: "stringArray",
+  excludePatterns: "stringArray",
+  excludeTitleKeywords: "stringArray",
+  escalationPressureLadder: "stringArray",
+  frustrationTriggers: "stringArray",
+} as const
+
 export const DEFAULT_CONFIG: PluginConfig = {
   enabled: true,
   message:

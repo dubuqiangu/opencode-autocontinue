@@ -5,13 +5,13 @@
 
 ## 当前状态
 
-- **已发布版本**：0.5.4（本轮发布；`src/config.ts` 有运行时 API 变更，按发布规则 bump）
-- **上一版本**：0.5.3（commit `ece2e56`）
-- **本轮修复内容概述**（本轮无用户可见行为变更）：
-  - 全局配置路径可注入：`loadConfig` 新增可选第二参数 `LoadConfigOptions`，可指定读取哪个全局配置文件；不传时行为与 v0.5.3 完全一致
-  - 测试不再改写 `USERPROFILE` / `HOME` 这类进程级环境变量来隔离真实用户配置——进程级全局状态在同进程并行跑测试时会互相污染
-  - 测试夹具去重：`test/server.test.ts` 自带的 `FakeStorage` / `makeFakeSession` / 引擎注册表删除，统一改用共享夹具 `test/support/harness.ts`，仓库内不再有第二份实现
-  - 测试解除文案硬编码：断言改为与配置常量比对，断言的是**行为**（注入的就是配置的那条消息）而不是文案本身
+- **已发布版本**：0.5.8（本轮发布；`src/` 有运行时改动，按发布规则 bump）
+- **上一版本**：0.5.7（commit `22e965f`）
+- **本轮修复内容概述**（本轮无用户可见的**功能**变更；变化集中在「静默盲区」与「可验证性」）：
+  - **配置层补齐「静默丢弃」诊断**：类型不匹配、非有限数值（`NaN` / `±Infinity`）、`message` / `finalCheckMessage` 空串、整个配置文件不是对象 —— 一律回退基础值并产生**恰好一条**告警。**生效值零变化**（纯增量诊断；已用 HEAD 版 vs 工作区版的差分探针逐字节比对证实）
+  - **v0.5.4 遗留的测试文案硬编码清完**：用户可见文案从 `src/` 导出为常量（`UNTRUSTED_NOTICE` / `rejectionCountLine` / `REMAINING_*`），断言改为与常量或配置槽比对，断言的是**行为**而不是文案本身
+  - **`stopReason` 渲染闭合**：footer 指示器与 `/autocontinue status` toast 的**文案拼装**从 `src/tui.tsx` 的 JSX 下沉到 `src/tui-logic.ts` 的两个纯函数（`footerIndicatorLabel` / `statusToastMessage`），「原因短语缺失 / 两处不一致 / 复数化错误」从此可确定性单测
+  - **跨午夜窗口补一条钉住日历日期的单测**：既有用例从实现自身读的 `now` 推导期望值，只能证明「落在某个时刻」；新用例把时钟固定在具体日期，断言 `computeEndAt` 恰落在**下一个日历日**的 08:30
 
 ## 阶段 A：骨架与 RPC ✅
 
@@ -65,10 +65,12 @@
       - `plugin list` → `autocontinue ba2c3fd` = GitHub HEAD
 - [ ] D1b 跨午夜值守窗口与侧栏实机验证
       - 验证：配置 `startTime`/`endTime` 为跨午夜窗口（如 22:00→08:30），确认窗口开/关两侧行为正确；侧栏 Watch 块 `⏱` 走动、`off` 立即消失
+      - 单测侧已补强（v0.5.8）：时钟固定在具体日历日期，断言 `computeEndAt` 恰落在**下一个日历日**的 08:30、午夜尾段闸门开、起点前空档闸门关——**剩余仅宿主真实墙钟的实机确认**
 - [ ] D2 续跑实测：真实造错/空闲 → 续跑消息注入；完成标记 → 停
       - 验证：观察会话历史 + footer + 侧栏 Watch 块；验证命令的 TOCTOU 复检路径（验证前快照比对）在实机上确认生效
 - [ ] D3 卸载/重装干净，无残留订阅
       - 验证：`plugin remove` 后无报错；重装后 `stopReason` 短语（如 `window closed` / `title excluded`）在 footer 与 `/autocontinue status` toast 中按预期显示
+      - 插件侧渲染已可确定性验证（v0.5.8）：footer 与 toast 的文案拼装下沉为 `src/tui-logic.ts` 的纯函数，并有覆盖 5 种状态 × 全部停止原因 × 复数化 × 两处一致的单测——**剩余仅宿主原样渲染层（emoji 宽度 / 字体 / toast 截断）的实机确认**
 
 ## 阶段 E：发布 ✅ 已完成（v0.3.x 发布窗口）
 
@@ -105,3 +107,4 @@
 - 已实现：DESIGN.md 目录树 + 交互顺序图；README.md；tsconfig.json
 - 2026-11-07（v0.5.3 本轮）：入口层文档全面校正（footer / 侧栏 / toast 实际形态、5 类停止护栏、8 个停止原因、`userGraceMs` 默认 15 秒、默认续跑消息文案、正确开发命令）；墙钟预算改为按轮次计量；停止原因新增 `title excluded`；单测定时器泄漏修复并新增 `test` script。验证由编排者统一执行（`npm test` / `npm run build:tui` / `node --experimental-strip-types --check src/<file>.ts`）。
 - 2026-11-08（v0.5.4 本轮）：全局配置路径可注入（`loadConfig` 新增可选 `LoadConfigOptions`，不传时行为不变）、测试夹具统一到 `test/support/harness.ts`、测试断言改为与配置常量比对（不再硬编码文案）。本轮无用户可见行为变更；验证由编排者统一执行。
+- 2026-11-19（v0.5.8 本轮）：配置层补齐「静默丢弃」诊断（类型不匹配 / 非有限值 / 必填空串 / 非对象配置文件一律回退基础值并产生**恰好一条**告警，**生效值零变化**——已用 HEAD 版 vs 工作区版的差分探针逐字节比对 24 组 override 电池证实）、v0.5.4 遗留的测试文案硬编码清完（文案从 `src/` 导出为常量，断言强度只增不减）、`stopReason` 的 footer / toast 文案拼装下沉为 `src/tui-logic.ts` 的两个纯函数、跨午夜窗口补一条**钉住日历日期**的单测。验证：`npm test` 380/380；`dist/tui.js` 用固定 esbuild 重打包幂等；全仓无 BOM / CRLF / U+FFFD。

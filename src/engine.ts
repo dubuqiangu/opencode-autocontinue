@@ -189,10 +189,15 @@ export function selectPressureMessage(ladder: string[], rejections: number): str
   return ladder[Math.min(tier, lastIndex)] ?? ""
 }
 
+/** The failure-count line appended to every verify-rejection prompt. */
+export function rejectionCountLine(rejections: number): string {
+  return `🚫 验证未通过（连续第 ${rejections} 次）。`
+}
+
 /** Compose the verify-failure prompt: base message + failure count, then the
  *  pressure-ladder row, then the reassess (>=3) and root-cause (>=5) additions. */
 export function composeRejectionPrompt(pluginConfig: PluginConfig, rejections: number): string {
-  const lines = [pluginConfig.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
+  const lines = [pluginConfig.message, rejectionCountLine(rejections)]
   const pressure = selectPressureMessage(pluginConfig.escalationPressureLadder, rejections)
   if (pressure) lines.push(pressure)
   if (rejections >= 3 && pluginConfig.escalationReassessMessage) lines.push(pluginConfig.escalationReassessMessage)

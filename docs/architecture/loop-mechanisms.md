@@ -177,10 +177,12 @@ verify 模式下完成信号只用于「触发验证」，不再用于「判定�
 
 - `selectPressureMessage(ladder, rejections)`（`src/engine.ts`）：分档
   `<=3 / <=7 / <=15 / <=30 / <=50 / else`，梯子更短时钳到最后一行，空数组返回 `""`。
+- `rejectionCountLine(rejections)`（`src/engine.ts`，v0.5.8 起导出）：失败计数行的单一真源
+  （`🚫 验证未通过（连续第 N 次）。`）。测试断言直接比对它，不再硬编码文案。
 - `composeRejectionPrompt(pluginConfig, rejections)`（`src/engine.ts`）：
 
   ```ts
-  const lines = [pluginConfig.message, `🚫 验证未通过（连续第 ${rejections} 次）。`]
+  const lines = [pluginConfig.message, rejectionCountLine(rejections)]
   const pressure = selectPressureMessage(pluginConfig.escalationPressureLadder, rejections)
   if (pressure) lines.push(pressure)
   if (rejections >= 3 && pluginConfig.escalationReassessMessage) lines.push(pluginConfig.escalationReassessMessage)
@@ -676,9 +678,11 @@ per-session Timeout 与 per-session Interval 全部残留——测试跑完后�
 原断言把默认续跑消息的中文文案硬编码在测试里，改文案就会让测试无故失败。改为与配置常量比对：
 断言的是**行为**（注入的就是配置的那条消息），而不是文案本身。
 
-> **状态：部分完成。** 默认续跑消息与 `finalCheckMessage` 的**部分**断言已改为与配置常量比对，
-> 但 `test/server.test.ts` 中仍有中文文案字面量断言（如 `/^继续执行/`、`/整体检查/`）。
-> v0.5.5 未补完，详见 `docs/decisions/changelog.md` 的 v0.5.5「本版没有做的事」。
+> **状态：已完成（v0.5.8）。** v0.5.5 时此处仍是「部分完成」——`test/server.test.ts` 中
+> 还残留中文文案字面量断言（如 `/^继续执行/`、`/整体检查/`）。v0.5.8 把剩余文案从 `src/`
+> 导出为常量（`UNTRUSTED_NOTICE` / `rejectionCountLine` / `REMAINING_*`），断言改为与常量或
+> 配置槽比对，**强度只增不减**（前缀正则改为全等，半句包含改为整句包含）。
+> 历史记录见 `docs/decisions/changelog.md` 的 v0.5.5「本版没有做的事」与 v0.5.8 正节。
 
 ---
 
@@ -715,11 +719,13 @@ per-session Timeout 与 per-session Interval 全部残留——测试跑完后�
   `idleDelayMs` / `minIntervalMs` 的**负值钳到 0 并告警**；
   `intervalMs` / `idleDelayMs` / `minIntervalMs` **超过上限**时钳到上限并告警。
   `intervalMs` 的 `0 = 关闭周期检查` 语义保持可达（只对正值套用 1s 下限）。
-- **v0.5.6 建立的不变式**：任何**被静默改写**的配置值都产出**恰好一条** `console.error`
-  （含键名、原始值、生效值）；**合法值零诊断**。覆盖范围：负值钳 0、`intervalMs` 正值低于
-  1s 地板、`intervalMs` / `idleDelayMs` / `minIntervalMs` 超 `2^31-1`、`maxConsecutive` 负值回退、
-  `watchTimeoutMs` / `userGraceMs` / `selfEchoWindowMs` 负值钳 0、`verifyTimeoutMs` 越界、
-  `verifyMaxIterations` 越界、6 个数组键剔除空串。
+- **v0.5.6 建立的不变式**：任何**被静默改写**的配置值，以及任何**写了但不可能生效**的配置值
+  （被静默忽略），都产出**恰好一条** `console.error`（含键名、原始值、生效值）；**合法值零诊断**。
+  覆盖范围：负值钳 0、`intervalMs` 正值低于 1s 地板、`intervalMs` / `idleDelayMs` /
+  `minIntervalMs` 超 `2^31-1`、`maxConsecutive` 负值回退、`watchTimeoutMs` / `userGraceMs` /
+  `selfEchoWindowMs` 负值钳 0、`verifyTimeoutMs` 越界、`verifyMaxIterations` 越界、6 个数组键剔除空串；
+  v0.5.8 补充类型不匹配、非有限数值、`message` / `finalCheckMessage` 为空，以及整个配置文件不是配置对象。
+  实现方式是**合并前类型预检**（`CONFIG_KEY_TYPES`）+ 既有守卫跳过 → **生效值零变化**。
   静默的合法值：`intervalMs = 0`、`userGraceMs = 0`、`watchTimeoutMs = 0`、`selfEchoWindowMs = 0`、
   `maxConsecutive = 0`、`verifyMaxIterations = 0`，以及各上下限本身。
 

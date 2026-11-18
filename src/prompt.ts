@@ -36,6 +36,13 @@ export interface SessionPromptLike {
   }): Promise<unknown>
 }
 
+/** The {remaining} rendering used when there is no time window at all. */
+export const REMAINING_UNLIMITED_TEXT = "不限"
+/** The {remaining} rendering unit for a remaining time of one hour or more. */
+export const REMAINING_HOUR_UNIT = "小时"
+/** The {remaining} rendering unit for a remaining time below one hour. */
+export const REMAINING_MINUTE_UNIT = "分钟"
+
 /** Render a message template replacing {time} and {remaining}. */
 export function renderMessage(template: string, endAt: number): string {
   const now = new Date()
@@ -44,10 +51,10 @@ export function renderMessage(template: string, endAt: number): string {
   const remainingMs = endAt > 0 ? Math.max(0, endAt - now.getTime()) : null
   const remaining =
     remainingMs === null
-      ? "不限"
+      ? REMAINING_UNLIMITED_TEXT
       : remainingMs >= 3_600_000
-        ? `${(remainingMs / 3_600_000).toFixed(1)} 小时`
-        : `${Math.max(1, Math.round(remainingMs / 60_000))} 分钟`
+        ? `${(remainingMs / 3_600_000).toFixed(1)} ${REMAINING_HOUR_UNIT}`
+        : `${Math.max(1, Math.round(remainingMs / 60_000))} ${REMAINING_MINUTE_UNIT}`
   return template.replace(/\{time\}/g, time).replace(/\{remaining\}/g, remaining)
 }
 

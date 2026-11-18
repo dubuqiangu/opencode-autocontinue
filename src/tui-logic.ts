@@ -106,6 +106,30 @@ export function watchStateLabel(state: string): string {
   return WATCH_STATE_LABELS[state]
 }
 
+/** The footer indicator text for a watch status. Returns null when the
+ *  session is not watched (the footer renders nothing at all). */
+export function footerIndicatorLabel(status: WatchStatusView | undefined): string | null {
+  if (status === undefined) return null
+  if (status.state === "done") return "[AC ✓]"
+  if (status.state === "paused") return "[AC ⏸]"
+  if (status.state === "stopped") {
+    // The stop reason is shown here and in the /autocontinue status toast
+    // only — the sidebar block never renders terminal states.
+    const phrase = stopReasonLabel(status.stopReason)
+    return phrase === undefined
+      ? `[AC ⏹ ${status.injections}]`
+      : `[AC ⏹ ${status.injections} · ${phrase}]`
+  }
+  return "[AC ●]"
+}
+
+/** The body of the /autocontinue status toast for a watched session. */
+export function statusToastMessage(status: WatchStatusView): string {
+  const phrase = status.state === "stopped" ? stopReasonLabel(status.stopReason) : undefined
+  const stopSuffix = phrase === undefined ? "" : ` · ${phrase}`
+  return `${watchStateLabel(status.state)} · ${status.injections} injection${status.injections === 1 ? "" : "s"}${stopSuffix}`
+}
+
 // "3m 22s" (≥1 min) or "45s"; "10h 13m" (≥1h); "2d 3h" (≥1d).
 // Clamps negative/NaN inputs to "0s".
 export function formatDuration(ms: number): string {
